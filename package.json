@@ -5,6 +5,7 @@
   "license": "MIT",
   "scripts": {
     "typecheck": "tsc -p tsconfig.node.json",
+    "test:unit": "node --test test/policy.test.ts",
     "test:container": "node --test test/container.test.ts"
   },
   "dependencies": {
