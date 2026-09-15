@@ -24,6 +24,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import type { ChildProcessByStdio } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
+import http from 'node:http';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -318,6 +319,47 @@ function rawHead(path: string): Promise<string> {
   });
 }
 
+/**
+ * A legacy tools/list POST to /wiki sent with node:http, which sends headers that fetch refuses, such as Expect. The
+ * body goes out with the headers, without waiting for 100 Continue. It resolves with the final status and the body.
+ */
+function postToolsList(headers: Record<string, string>): Promise<{ status: number | undefined; body: string }> {
+  const { hostname, port } = devServer();
+  return new Promise((resolve, reject) => {
+    const outgoing = http.request(
+      {
+        host: hostname,
+        port,
+        path: '/wiki',
+        method: 'POST',
+        headers: { ...MCP_HEADERS, 'content-length': String(Buffer.byteLength(TOOLS_LIST)), ...headers },
+        // A one-off agent, so no kept-alive socket outlives the request.
+        agent: false,
+        signal: AbortSignal.timeout(REQUEST_MS),
+      },
+      (incoming) => {
+        let body = '';
+        incoming.setEncoding('utf8');
+        incoming.on('data', (chunk: string) => {
+          body += chunk;
+        });
+        incoming.on('end', () => resolve({ status: incoming.statusCode, body }));
+        incoming.on('error', reject);
+      },
+    );
+    outgoing.on('error', reject);
+    outgoing.end(TOOLS_LIST);
+  });
+}
+
+/** The result.tools of a legacy tools/list answer, parsed from its text/event-stream data: line. */
+function toolsIn(body: string): unknown {
+  const data = body.split(/\r?\n/).find((line) => line.startsWith('data:'));
+  if (data === undefined) return undefined;
+  const message: { result?: { tools?: unknown } } = JSON.parse(data.slice('data:'.length));
+  return message.result?.tools;
+}
+
 test('the landing page answers GET on / and /wiki, and HEAD on /, with the deployed commit', async () => {
   for (const path of ['/', '/wiki']) {
     const response = await request(path, { headers: { accept: 'text/html' } });
@@ -437,6 +479,13 @@ test('MCP requests reach the container, which serves the pinned artifact', async
   });
   const targetedBody = await targeted.text();
   assert.equal(targeted.status, 200, `a tools/list with cf-container-target-port: 8081: ${targetedBody}`);
+
+  // curl sends Expect: 100-continue with an upload. Forwarded, it makes the server answer 100 Continue, which the
+  // container proxy cannot pass on, so the request would get 500.
+  const expecting = await postToolsList({ expect: '100-continue' });
+  assert.equal(expecting.status, 200, `a tools/list with Expect: 100-continue: ${expecting.body.slice(0, 200)}`);
+  const tools = toolsIn(expecting.body);
+  assert.ok(Array.isArray(tools) && tools.length > 0, `no tools in ${expecting.body.slice(0, 200)}`);
 
   // The count of 0 in the test before means something only if the count can see the container these woke.
   assert.notDeepEqual(sessionContainers(), [], 'docker ps shows no dev container of this session');
