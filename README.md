@@ -124,6 +124,10 @@ could rewrite the mail records of `tibia.sh`, or the TXT record that holds its M
 Certificates Write, they could change its certificates. If a deploy asks for one of these, the maintainer attaches
 `mcp.tibia.sh` to the Worker by hand as a Custom Domain instead.
 
+If the deploy still fails the same way after you attach the domain by hand, remove `routes` from `wrangler.jsonc`
+through a pull request. Every deploy sends the custom-domain request while `routes` is in the config. Removing it
+skips that step and never detaches the domain.
+
 The first deploy settles this list. If it shows otherwise, this section changes.
 
 The token has no expiry, so it lasts until it is rotated or revoked. To rotate it:
