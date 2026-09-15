@@ -29,8 +29,8 @@ Cloudflare attaches the request URL to the Worker's log events, with your query 
 
 ## How a release reaches the endpoint
 
-1. A new `@tibia.sh/tibiawiki-mcp` or `@tibia.sh/tibiawiki-data` release reaches npm. Dependabot checks npm daily
-   and opens one pull request that bumps the `@tibia.sh/*` pins. First-party packages skip its 7-day cooldown.
+1. A new `@tibia.sh/tibiawiki-mcp` or `@tibia.sh/tibiawiki-data` release reaches npm. Dependabot checks npm every
+   hour, on the hour, and opens one pull request that bumps the `@tibia.sh/*` pins.
 2. CI runs the required checks `unit`, `container` and `worker` on the pull request. No job reads a secret, so a
    Dependabot pull request runs every check. `container` builds the image and checks that it serves the pinned
    server version and index.
@@ -43,8 +43,9 @@ Cloudflare attaches the request URL to the Worker's log events, with your query 
      merged commit in `x-deploy-commit`, and `/wiki` serves the pinned server version and index. It starts no new
      attempt after 10 minutes.
 
-Other dependencies take the same path after a 7-day cooldown: the other npm packages daily, and the base image
-and the actions weekly.
+Dependabot updates nothing else. You bump everything else by hand in a pull request: `wrangler` and the other npm
+packages, the base image digest and the actions. Dependabot alerts still tell you when a dependency has a known
+vulnerability.
 
 ## Compatibility rule
 
@@ -85,11 +86,10 @@ next deploy brings the regression back.
 During a CI outage, the maintainer may disable the ruleset to merge the revert, then enable it again right after.
 The merge's deploy still waits for `ci` to pass on the merged commit.
 
-## Dependabot wrangler bumps
+## Wrangler bumps
 
 Each `wrangler` release pins its own `workerd`. When a bump changes that version, `worker` fails at
-`wrangler types --check`, because the generated types name the `workerd` version they came from. On the
-Dependabot branch:
+`wrangler types --check`, because the generated types name the `workerd` version they came from. On your branch:
 
 1. Run `npm ci --ignore-scripts`.
 2. Run `npm ls workerd` to read the new version.
@@ -106,8 +106,7 @@ Dependabot branch:
 `npm run check:lockfile`. It fails on any lockfile entry outside `@tibia.sh/*` that is younger than 7 days, and on
 any `@tibia.sh/*` entry without provenance from a `tibia-sh` repository.
 
-A pull request that brings in a younger entry waits until the entry is 7 days old, and a Dependabot security update
-waits too. Re-run `unit` then.
+A pull request that brings in a younger entry waits until the entry is 7 days old. Re-run `unit` then.
 
 ## The deploy token
 

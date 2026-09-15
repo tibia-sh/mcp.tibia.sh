@@ -2,17 +2,12 @@ version: 2
 updates:
   - package-ecosystem: npm
     directory: /
-    schedule: { interval: daily }
+    schedule:
+      interval: cron
+      cronjob: "0 * * * *"
+    allow:
+      - dependency-name: "@tibia.sh/*"
+    cooldown:
+      exclude: ["@tibia.sh/*"]
     groups:
       tibia-sh: { patterns: ["@tibia.sh/*"] }
-    cooldown:
-      default-days: 7
-      exclude: ["@tibia.sh/*"]
-  - package-ecosystem: docker
-    directory: /
-    schedule: { interval: weekly }
-    cooldown: { default-days: 7 }
-  - package-ecosystem: github-actions
-    directory: /
-    schedule: { interval: weekly }
-    cooldown: { default-days: 7 }
