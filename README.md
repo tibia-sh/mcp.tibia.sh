@@ -117,18 +117,15 @@ The token holds these permissions:
 | Scope | Permissions |
 |---|---|
 | Account | Workers Scripts Write, Workers Containers Write, Cloudchamber Write, Account Settings Read |
-| Zone `tibia.sh` | Workers Routes Write, Zone Read |
+| Zone `tibia.sh` | Workers Routes Write, Zone Read, DNS Write, SSL and Certificates Write |
 
-It must never hold DNS Write, SSL and Certificates Write, or any other zone permission. With DNS Write, a holder
-could rewrite the mail records of `tibia.sh`, or the TXT record that holds its MCP registry key. With SSL and
-Certificates Write, they could change its certificates. If a deploy asks for one of these, the maintainer attaches
-`mcp.tibia.sh` to the Worker by hand as a Custom Domain instead.
+DNS Write and SSL and Certificates Write cover the custom domain attach whatever permission Cloudflare checks for
+it. They also widen what a leaked token can do. With DNS Write, a holder could rewrite the mail records of
+`tibia.sh`, or the TXT record that holds its MCP registry key. With SSL and Certificates Write, they could change
+its certificates. The maintainer accepted that trade-off. If this token leaks, rotate it at once.
 
-If the deploy still fails the same way after you attach the domain by hand, remove `routes` from `wrangler.jsonc`
-through a pull request. Every deploy sends the custom-domain request while `routes` is in the config. Removing it
-skips that step and never detaches the domain.
-
-The first deploy settles this list. If it shows otherwise, this section changes.
+If a deploy still asks for a permission this list lacks, the maintainer adds it to the token in place, and this
+section changes.
 
 The token has no expiry, so it lasts until it is rotated or revoked. To rotate it:
 
