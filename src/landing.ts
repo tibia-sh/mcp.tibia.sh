@@ -36,7 +36,7 @@ export function landingPage(): string {
 <ul>
 <li>Cloudflare processes every request. Your IP address is used for rate limiting.</li>
 <li>Cloudflare's analytics may keep sampled request details, such as your IP address, under Cloudflare's own policies.</li>
-<li>This service writes no request logs. It writes only error lines without data from your requests, and keeps them for 7 days.</li>
+<li>This service writes no request logs. It writes only startup, sleep and error lines, with no data from your requests, and keeps them for 7 days.</li>
 </ul>
 </body>
 </html>
