@@ -67,13 +67,17 @@ export default {
       return new Response('Too Many Requests', { status: 429, headers: { 'Retry-After': RATE_LIMITED_RETRY_AFTER } });
     }
 
-    // Container.fetch takes its port from cf-container-target-port, so no client may choose it. The buffered body
-    // goes out with a Content-Length, which the server requires, so a chunked request's Transfer-Encoding stays
-    // behind. workerd drops a copied one as well, but does not document that. The container serves MCP at /mcp and
-    // takes no query string.
+    // The forwarded request leaves three headers behind:
+    // - cf-container-target-port, because Container.fetch takes its port from it, so no client may choose it.
+    // - Transfer-Encoding, because the buffered body goes out with a Content-Length, which the server requires.
+    //   workerd drops a copied one as well, but does not document that.
+    // - Expect, because the body is already whole. Forwarded, Expect: 100-continue makes the server answer
+    //   100 Continue, which the container proxy cannot turn into a response, and the request gets 500.
+    // The container serves MCP at /mcp and takes no query string.
     const headers = new Headers(request.headers);
     headers.delete('cf-container-target-port');
     headers.delete('transfer-encoding');
+    headers.delete('expect');
     const target = new URL('/mcp', request.url);
     return forwardWithRetry(
       body,
