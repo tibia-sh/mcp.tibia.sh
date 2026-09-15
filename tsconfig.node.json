@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "types": ["node"],
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "noEmit": true,
+    "allowJs": true,
+    "maxNodeModuleJsDepth": 1,
+    "erasableSyntaxOnly": true
+  },
+  "include": ["scripts/**/*.ts", "test/**/*.ts"]
+}
