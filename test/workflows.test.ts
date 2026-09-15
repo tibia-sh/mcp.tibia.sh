@@ -8,6 +8,7 @@
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import { test } from 'node:test';
+import { isDeepStrictEqual } from 'node:util';
 import { parse } from 'yaml';
 
 const WORKFLOWS = new URL('../.github/workflows/', import.meta.url);
@@ -18,8 +19,14 @@ const LOCAL_CI = './.github/workflows/ci.yml';
 const PINNED = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+@[0-9a-f]{40}$/;
 /** The required checks, which are ci.yml's job IDs. */
 const REQUIRED_JOBS = ['container', 'unit', 'worker'];
+/** What the wrangler deploy step of deploy.yml's deploy job runs. It is the one step that gets the deploy token. */
+const WRANGLER_DEPLOY = 'npx wrangler deploy --var DEPLOY_COMMIT:${{ github.sha }}';
+/** The path of a job's or a step's own if: or continue-on-error. Job IDs hold no dots. */
+const CONDITION = /^jobs\.[^.]+(?:\.steps\.\d+)?\.(?:if|continue-on-error)$/;
 /** The secrets context as an expression names it, and not a property or an identifier that only contains the word. */
 const SECRETS_CONTEXT = /(?<![\w.-])secrets(?![\w-])/i;
+/** The vars context, which holds CLOUDFLARE_ACCOUNT_ID, matched the same way. */
+const VARS_CONTEXT = /(?<![\w.-])vars(?![\w-])/i;
 
 type Mapping = Record<string, unknown>;
 
@@ -62,11 +69,25 @@ function jobsOf(file: string, document: unknown): Record<string, Mapping> {
   return jobs as Record<string, Mapping>;
 }
 
-/** The parsed ci.yml. */
-function ciWorkflow(): unknown {
-  const ci = workflows.find(({ file }) => file === 'ci.yml');
-  assert.ok(ci, '.github/workflows/ci.yml does not exist');
-  return ci.document;
+/** The parsed workflow in .github/workflows/<file>, which must exist. */
+function workflow(file: string): unknown {
+  const found = workflows.find((candidate) => candidate.file === file);
+  assert.ok(found, `.github/workflows/${file} does not exist`);
+  return found.document;
+}
+
+/**
+ * The events that trigger a parsed workflow, as a mapping of event name to its filters or null, whether `on:` names
+ * one event, lists several, or maps them.
+ */
+function triggers(file: string, document: unknown): Mapping {
+  const on = isMapping(document) ? document['on'] : undefined;
+  if (typeof on === 'string') return { [on]: null };
+  if (Array.isArray(on) && on.every((event) => typeof event === 'string')) {
+    return Object.fromEntries(on.map((event) => [event, null]));
+  }
+  assert.ok(isMapping(on), `${file} has no on: naming its triggers`);
+  return on;
 }
 
 /**
@@ -101,10 +122,10 @@ function expressions(file: string, document: unknown): Array<{ where: string; ex
   });
 }
 
-/** The expressions in document that reference the secrets context. */
-function secretsReferences(file: string, document: unknown): string[] {
+/** The expressions in document that reference the context, each as `<file> <path>: <expression>`. */
+function references(file: string, document: unknown, context: RegExp): string[] {
   return expressions(file, document)
-    .filter(({ expression }) => SECRETS_CONTEXT.test(expression))
+    .filter(({ expression }) => context.test(expression))
     .map(({ where, expression }) => `${where}: ${expression}`);
 }
 
@@ -117,18 +138,19 @@ test(`every uses: is ${LOCAL_CI} or an action pinned by a full commit SHA`, () =
   assert.deepEqual(unpinned, []);
 });
 
-test('every actions/checkout step has with: { persist-credentials: false }', () => {
+test('every actions/checkout step has exactly with: { persist-credentials: false }', () => {
   const checkouts = allNodes().filter(
     ({ key, value }) => key === 'uses' && typeof value === 'string' && /^actions\/checkout@/i.test(value),
   );
   assert.ok(checkouts.length > 0, 'no workflow has an actions/checkout step');
-  const persisting = checkouts
+  // Any other input, a ref above all, could check out a commit other than the one CI tested or deploy.yml labels.
+  const differing = checkouts
     .filter(({ holder }) => {
       const inputs = isMapping(holder) ? holder['with'] : undefined;
-      return !isMapping(inputs) || inputs['persist-credentials'] !== false;
+      return !isDeepStrictEqual(inputs, { 'persist-credentials': false });
     })
     .map(({ where }) => where);
-  assert.deepEqual(persisting, []);
+  assert.deepEqual(differing, []);
 });
 
 test("every workflow's top-level permissions are exactly { contents: read }, and no job sets permissions", () => {
@@ -142,6 +164,24 @@ test("every workflow's top-level permissions are exactly { contents: read }, and
   }
 });
 
+test("ci.yml's triggers are exactly pull_request and workflow_call", () => {
+  assert.deepEqual(Object.keys(triggers('ci.yml', workflow('ci.yml'))).toSorted(), ['pull_request', 'workflow_call']);
+});
+
+test("deploy.yml's triggers are exactly a push to main and workflow_dispatch", () => {
+  assert.deepEqual(triggers('deploy.yml', workflow('deploy.yml')), {
+    push: { branches: ['main'] },
+    workflow_dispatch: null,
+  });
+});
+
+test('no workflow is triggered by pull_request_target', () => {
+  const targeted = workflows
+    .filter(({ file, document }) => Object.hasOwn(triggers(file, document), 'pull_request_target'))
+    .map(({ file }) => file);
+  assert.deepEqual(targeted, []);
+});
+
 test('no workflow has secrets: inherit', () => {
   const inherits = (value: unknown) => typeof value === 'string' && value.trim().toLowerCase() === 'inherit';
   const inheriting = allNodes()
@@ -151,7 +191,30 @@ test('no workflow has secrets: inherit', () => {
 });
 
 test('ci.yml references no secrets context', () => {
-  assert.deepEqual(secretsReferences('ci.yml', ciWorkflow()), []);
+  assert.deepEqual(references('ci.yml', workflow('ci.yml'), SECRETS_CONTEXT), []);
+});
+
+test("the one secret any workflow references is secrets.CLOUDFLARE_API_TOKEN, once, in the wrangler step's env", () => {
+  const steps = jobsOf('deploy.yml', workflow('deploy.yml'))['deploy']?.['steps'];
+  assert.ok(Array.isArray(steps), 'deploy.yml has no deploy job with steps');
+  const at = steps.findIndex((step: unknown) => isMapping(step) && step['run'] === WRANGLER_DEPLOY);
+  assert.notEqual(at, -1, `deploy.yml jobs.deploy has no step that runs ${WRANGLER_DEPLOY}`);
+  assert.deepEqual(
+    workflows.flatMap(({ file, document }) => references(file, document, SECRETS_CONTEXT)),
+    [`deploy.yml jobs.deploy.steps.${at}.env.CLOUDFLARE_API_TOKEN: secrets.CLOUDFLARE_API_TOKEN`],
+  );
+  assert.deepEqual(steps[at]['env'], {
+    CLOUDFLARE_API_TOKEN: '${{ secrets.CLOUDFLARE_API_TOKEN }}',
+    CLOUDFLARE_ACCOUNT_ID: '${{ vars.CLOUDFLARE_ACCOUNT_ID }}',
+    WRANGLER_SEND_METRICS: 'false',
+  });
+});
+
+test("no expression outside deploy.yml's deploy job references the vars context", () => {
+  const outside = workflows
+    .flatMap(({ file, document }) => references(file, document, VARS_CONTEXT))
+    .filter((reference) => !reference.startsWith('deploy.yml jobs.deploy.'));
+  assert.deepEqual(outside, []);
 });
 
 test('the secrets scan ends expressions where GitHub does, and reads keys and bare if: values', () => {
@@ -168,7 +231,7 @@ test('the secrets scan ends expressions where GitHub does, and reads keys and ba
     ].join('\n'),
   ) as unknown;
   assert.deepEqual(
-    secretsReferences('fixture', found).map((line) => line.split(': ')[0]),
+    references('fixture', found, SECRETS_CONTEXT).map((line) => line.split(': ')[0]),
     [
       'fixture quoted-braces',
       'fixture escaped-quote',
@@ -180,8 +243,23 @@ test('the secrets scan ends expressions where GitHub does, and reads keys and ba
   );
 });
 
+test("the vars scan finds vars.X, vars['X'] and toJSON(vars), and not steps.vars.x or inputs.no-vars", () => {
+  const found = parse(
+    [
+      'dotted: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}',
+      "indexed: ${{ vars['CLOUDFLARE_ACCOUNT_ID'] }}",
+      'whole: ${{ toJSON(vars) }}',
+      'not-expressions: "echo vars ${{ steps.vars.outputs.x }} ${{ inputs.no-vars }} ${{ env.VARS }}"',
+    ].join('\n'),
+  ) as unknown;
+  assert.deepEqual(
+    references('fixture', found, VARS_CONTEXT).map((line) => line.split(': ')[0]),
+    ['fixture dotted', 'fixture indexed', 'fixture whole'],
+  );
+});
+
 test('ci.yml defines exactly the jobs unit, container and worker, none with if: or name:', () => {
-  const jobs = jobsOf('ci.yml', ciWorkflow());
+  const jobs = jobsOf('ci.yml', workflow('ci.yml'));
   assert.deepEqual(Object.keys(jobs).toSorted(), REQUIRED_JOBS);
   const keyed = (key: string) => Object.keys(jobs).filter((id) => Object.hasOwn(jobs[id] as Mapping, key));
   assert.deepEqual(keyed('if'), [], 'ci.yml jobs with an if:, whose required check a condition could skip');
@@ -197,6 +275,53 @@ test('no workflow but ci.yml defines a job with the ID of a required check', () 
         .map((id) => `${file} jobs.${id}`),
     );
   assert.deepEqual(reused, []);
+});
+
+test('no job or step in any workflow has an if: or continue-on-error, so a failure stops what depends on it', () => {
+  assert.deepEqual(
+    allNodes()
+      .filter(({ path }) => CONDITION.test(path))
+      .map(({ where }) => where),
+    [],
+  );
+});
+
+test('no job in any workflow has a static name: of a required check', () => {
+  const shadowing = workflows.flatMap(({ file, document }) =>
+    Object.entries(jobsOf(file, document))
+      .filter(([, job]) => {
+        const name = job['name'];
+        return typeof name === 'string' && REQUIRED_JOBS.includes(name.trim().toLowerCase());
+      })
+      .map(([id]) => `${file} jobs.${id}`),
+  );
+  assert.deepEqual(shadowing, []);
+});
+
+test("deploy.yml's deploy job needs the ci job, which calls ci.yml, and deploys in cloudflare-production", () => {
+  const { ci, deploy } = jobsOf('deploy.yml', workflow('deploy.yml'));
+  assert.ok(ci && deploy, 'deploy.yml needs a ci job and a deploy job');
+  assert.equal(ci['uses'], LOCAL_CI);
+  assert.equal(deploy['needs'], 'ci');
+  assert.equal(deploy['environment'], 'cloudflare-production');
+});
+
+test("deploy.yml's smoke job needs deploy and has no environment", () => {
+  const { smoke } = jobsOf('deploy.yml', workflow('deploy.yml'));
+  assert.ok(smoke, 'deploy.yml has no smoke job');
+  assert.equal(smoke['needs'], 'deploy');
+  assert.ok(
+    !Object.hasOwn(smoke, 'environment'),
+    'deploy.yml jobs.smoke has an environment, whose secrets it could then read',
+  );
+});
+
+test('deploy.yml runs in the concurrency group deploy, which never cancels a run in progress', () => {
+  const document = workflow('deploy.yml');
+  assert.deepEqual(isMapping(document) ? document['concurrency'] : undefined, {
+    group: 'deploy',
+    'cancel-in-progress': false,
+  });
 });
 
 test('wrangler.jsonc has no build key', () => {
