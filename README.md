@@ -29,12 +29,12 @@ Cloudflare attaches the request URL to the Worker's log events, with your query 
 
 ## How a release reaches the endpoint
 
-1. A new `@tibia.sh/tibiawiki-mcp` or `@tibia.sh/tibiawiki-data` release reaches npm. Dependabot checks npm once a
-   day, at 12:00 UTC, and opens one pull request that bumps the `@tibia.sh/*` pins. To get it sooner, open the
-   repository's Insights tab, then Dependency graph, then Dependabot, and click Check for updates.
-2. CI runs the required checks `unit`, `container` and `worker` on the pull request. No job reads a secret, so a
-   Dependabot pull request runs every check. `container` builds the image and checks that it serves the pinned
-   server version and index.
+1. A new `@tibia.sh/tibiawiki-mcp` or `@tibia.sh/tibiawiki-data` release reaches npm. A pull request bumps the
+   `@tibia.sh/*` pins. Until the release trigger lands, open it by hand with
+   `npm install --save-exact --ignore-scripts <package>@<version>`.
+2. CI runs the required checks `unit`, `container` and `worker` on the pull request. No job reads a secret, so
+   every pull request runs every check. `container` builds the image and checks that it serves the pinned server
+   version and index.
 3. You merge the pull request once the checks pass. The push to `main` runs `deploy.yml`:
    - `ci` runs the same checks on the merged commit.
    - `deploy` runs `npm audit signatures`, then `wrangler deploy` with the token of the `cloudflare-production`
@@ -44,9 +44,8 @@ Cloudflare attaches the request URL to the Worker's log events, with your query 
      merged commit in `x-deploy-commit`, and `/wiki` serves the pinned server version and index. It starts no new
      attempt after 10 minutes.
 
-Dependabot updates nothing else. You bump everything else by hand in a pull request: `wrangler` and the other npm
-packages, the base image digest and the actions. Dependabot alerts still tell you when a dependency has a known
-vulnerability.
+Nothing bumps the other dependencies for you. You bump `wrangler` and the other npm packages, the base image digest
+and the actions by hand in a pull request.
 
 ## Compatibility rule
 
