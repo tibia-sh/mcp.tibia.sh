@@ -21,6 +21,9 @@ const PINNED = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+@[0-9a-f]{40}$/;
 const REQUIRED_JOBS = ['container', 'unit', 'worker'];
 /** What the wrangler deploy step of deploy.yml's deploy job runs. It is the one step that gets the deploy token. */
 const WRANGLER_DEPLOY = 'npx wrangler deploy --var DEPLOY_COMMIT:${{ github.sha }}';
+/** What the last step of deploy.yml's smoke job runs: the served-artifact check of the live URL, for this commit. */
+const SMOKE_CHECK =
+  'node scripts/served-artifact.ts https://mcp.tibia.sh/wiki --wait-seconds 600 --expect-commit ${{ github.sha }}';
 /** The path of a job's or a step's own if: or continue-on-error. Job IDs hold no dots. */
 const CONDITION = /^jobs\.[^.]+(?:\.steps\.\d+)?\.(?:if|continue-on-error)$/;
 /** The secrets context as an expression names it, and not a property or an identifier that only contains the word. */
@@ -74,6 +77,21 @@ function workflow(file: string): unknown {
   const found = workflows.find((candidate) => candidate.file === file);
   assert.ok(found, `.github/workflows/${file} does not exist`);
   return found.document;
+}
+
+/** The steps of a job in a workflow, which must be a sequence. */
+function stepsOf(file: string, job: string): unknown[] {
+  const steps = jobsOf(file, workflow(file))[job]?.['steps'];
+  assert.ok(Array.isArray(steps), `${file} jobs.${job} has no steps`);
+  return steps;
+}
+
+/** The first of steps that runs exactly command, with its index. where names the job, for the failure. */
+function stepRunning(steps: unknown[], command: string, where: string): { at: number; step: Mapping } {
+  const at = steps.findIndex((step) => isMapping(step) && step['run'] === command);
+  const step = steps[at];
+  assert.ok(isMapping(step), `${where} has no step that runs ${command}`);
+  return { at, step };
 }
 
 /**
@@ -195,15 +213,12 @@ test('ci.yml references no secrets context', () => {
 });
 
 test("the one secret any workflow references is secrets.CLOUDFLARE_API_TOKEN, once, in the wrangler step's env", () => {
-  const steps = jobsOf('deploy.yml', workflow('deploy.yml'))['deploy']?.['steps'];
-  assert.ok(Array.isArray(steps), 'deploy.yml has no deploy job with steps');
-  const at = steps.findIndex((step: unknown) => isMapping(step) && step['run'] === WRANGLER_DEPLOY);
-  assert.notEqual(at, -1, `deploy.yml jobs.deploy has no step that runs ${WRANGLER_DEPLOY}`);
+  const { at, step } = stepRunning(stepsOf('deploy.yml', 'deploy'), WRANGLER_DEPLOY, 'deploy.yml jobs.deploy');
   assert.deepEqual(
     workflows.flatMap(({ file, document }) => references(file, document, SECRETS_CONTEXT)),
     [`deploy.yml jobs.deploy.steps.${at}.env.CLOUDFLARE_API_TOKEN: secrets.CLOUDFLARE_API_TOKEN`],
   );
-  assert.deepEqual(steps[at]['env'], {
+  assert.deepEqual(step['env'], {
     CLOUDFLARE_API_TOKEN: '${{ secrets.CLOUDFLARE_API_TOKEN }}',
     CLOUDFLARE_ACCOUNT_ID: '${{ vars.CLOUDFLARE_ACCOUNT_ID }}',
     WRANGLER_SEND_METRICS: 'false',
@@ -314,6 +329,22 @@ test("deploy.yml's smoke job needs deploy and has no environment", () => {
     !Object.hasOwn(smoke, 'environment'),
     'deploy.yml jobs.smoke has an environment, whose secrets it could then read',
   );
+});
+
+test("deploy.yml's deploy job runs npm audit signatures, then wrangler deploy", () => {
+  const steps = stepsOf('deploy.yml', 'deploy');
+  const audit = stepRunning(steps, 'npm audit signatures', 'deploy.yml jobs.deploy').at;
+  const deploy = stepRunning(steps, WRANGLER_DEPLOY, 'deploy.yml jobs.deploy').at;
+  assert.ok(
+    audit < deploy,
+    `deploy.yml jobs.deploy runs npm audit signatures at step ${audit}, after wrangler deploy at step ${deploy}`,
+  );
+});
+
+test("deploy.yml's smoke job ends by running the served-artifact check for this commit", () => {
+  const last = stepsOf('deploy.yml', 'smoke').at(-1);
+  assert.ok(isMapping(last), 'deploy.yml jobs.smoke has no last step');
+  assert.equal(last['run'], SMOKE_CHECK);
 });
 
 test('deploy.yml runs in the concurrency group deploy, which never cancels a run in progress', () => {
