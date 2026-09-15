@@ -1,0 +1,55 @@
+name: deploy
+
+# Deploys main on every push, and on a dispatch. The ci job runs ci.yml on the commit being deployed,
+# so the deploy never races a separate CI run.
+on:
+  push: { branches: [main] }
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run at a time. A newer run waits, never cancels the run in progress, and replaces a run still waiting.
+concurrency: { group: deploy, cancel-in-progress: false }
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: ci
+    environment: cloudflare-production
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '26'
+      - run: npm ci --ignore-scripts
+      - run: npm audit signatures
+      # The only step that gets the token. wrangler builds and pushes the image and deploys the Worker, with
+      # this commit as DEPLOY_COMMIT, which the landing page answers as x-deploy-commit.
+      - run: npx wrangler deploy --var DEPLOY_COMMIT:${{ github.sha }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_SEND_METRICS: 'false'
+
+  # No environment, so the client and first-party code this job runs can never read the token. It waits
+  # until the live Worker answers with this commit and serves the pinned server and index.
+  smoke:
+    needs: deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '26'
+      - run: npm ci --ignore-scripts
+      - run: node scripts/served-artifact.ts https://mcp.tibia.sh/wiki --wait-seconds 600 --expect-commit ${{ github.sha }}
