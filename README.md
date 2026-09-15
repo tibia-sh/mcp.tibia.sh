@@ -29,8 +29,9 @@ Cloudflare attaches the request URL to the Worker's log events, with your query 
 
 ## How a release reaches the endpoint
 
-1. A new `@tibia.sh/tibiawiki-mcp` or `@tibia.sh/tibiawiki-data` release reaches npm. Dependabot checks npm every
-   hour, on the hour, and opens one pull request that bumps the `@tibia.sh/*` pins.
+1. A new `@tibia.sh/tibiawiki-mcp` or `@tibia.sh/tibiawiki-data` release reaches npm. Dependabot checks npm once a
+   day, at 12:00 UTC, and opens one pull request that bumps the `@tibia.sh/*` pins. To get it sooner, open the
+   repository's Insights tab, then Dependency graph, then Dependabot, and click Check for updates.
 2. CI runs the required checks `unit`, `container` and `worker` on the pull request. No job reads a secret, so a
    Dependabot pull request runs every check. `container` builds the image and checks that it serves the pinned
    server version and index.
