@@ -23,12 +23,12 @@ test('it gives the URL to add and links both source repos', () => {
 });
 
 test("it carries the privacy note's three statements", () => {
-  assertContains('Cloudflare processes every request, and your IP address is used for rate limiting.');
+  assertContains('Cloudflare processes every request. Your IP address is used for rate limiting.');
   assertContains(
     "Cloudflare's analytics may keep sampled request details, such as your IP address, under Cloudflare's own policies.",
   );
   assertContains(
-    'This service writes no request logs, only error lines without data from your requests, which are kept for 7 days.',
+    'This service writes no request logs. It writes only error lines without data from your requests, and keeps them for 7 days.',
   );
 });
 

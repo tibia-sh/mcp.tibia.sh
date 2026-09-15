@@ -29,14 +29,14 @@ export function landingPage(): string {
 <li><code>/wiki</code> is the TibiaWiki MCP server. It answers attribute queries over creatures, items, NPCs, quests and spells from a snapshot of TibiaWiki.</li>
 </ul>
 <p>To use it, add <code>https://mcp.tibia.sh/wiki</code> to your MCP client as a remote MCP server. It needs no authentication.</p>
-<p>It runs <code>${SERVER}</code> with the index from <code>${DATA}</code>.</p>
-<p>The server's source is at <a href="https://github.com/tibia-sh/tibiawiki-mcp">github.com/tibia-sh/tibiawiki-mcp</a>, and this deployment's source is at <a href="https://github.com/tibia-sh/mcp.tibia.sh">github.com/tibia-sh/mcp.tibia.sh</a>.</p>
+<p><code>/wiki</code> runs <code>${SERVER}</code> with the index from <code>${DATA}</code>.</p>
+<p>The server's source is at <a href="https://github.com/tibia-sh/tibiawiki-mcp">github.com/tibia-sh/tibiawiki-mcp</a>. This deployment's source is at <a href="https://github.com/tibia-sh/mcp.tibia.sh">github.com/tibia-sh/mcp.tibia.sh</a>.</p>
 <p>Data from TibiaWiki (https://tibia.fandom.com), licensed CC BY-SA. Tibia is made by CipSoft; game content and images are copyright CipSoft GmbH.</p>
 <p>What happens to your requests:</p>
 <ul>
-<li>Cloudflare processes every request, and your IP address is used for rate limiting.</li>
+<li>Cloudflare processes every request. Your IP address is used for rate limiting.</li>
 <li>Cloudflare's analytics may keep sampled request details, such as your IP address, under Cloudflare's own policies.</li>
-<li>This service writes no request logs, only error lines without data from your requests, which are kept for 7 days.</li>
+<li>This service writes no request logs. It writes only error lines without data from your requests, and keeps them for 7 days.</li>
 </ul>
 </body>
 </html>
