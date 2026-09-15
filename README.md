@@ -1,8 +1,8 @@
 # mcp.tibia.sh
 
 This repository deploys the TibiaWiki MCP server to `https://mcp.tibia.sh/wiki`. A Cloudflare Worker answers
-every request itself, except MCP requests to `/wiki`, which it passes on to one Cloudflare Container. The
-container runs [`@tibia.sh/tibiawiki-mcp`](https://github.com/tibia-sh/tibiawiki-mcp) with the index from
+every request itself. The one exception is MCP requests to `/wiki`, which it passes on to one Cloudflare
+Container. The container runs [`@tibia.sh/tibiawiki-mcp`](https://github.com/tibia-sh/tibiawiki-mcp) with the index from
 [`@tibia.sh/tibiawiki-data`](https://github.com/tibia-sh/tibiawiki-data), at the exact versions `package.json` pins.
 
 To use it, add `https://mcp.tibia.sh/wiki` to your MCP client as a remote MCP server. It needs no authentication.
@@ -14,8 +14,8 @@ It serves the same five tools as a local install, over Streamable HTTP. The land
 The Worker allows about 300 JSON-RPC messages per 60 s from each IPv4 address or IPv6 /64. Every message in a
 batch counts. Past the limit, it answers `429` with `Retry-After: 60`.
 
-The limit is approximate, because Cloudflare counts it per location and applies it permissively. claude.ai users
-share Anthropic's egress IPs, so they share one allowance.
+The limit is approximate. Cloudflare counts it per location and applies it permissively. claude.ai users share
+Anthropic's egress IPs, so they share one allowance.
 
 ## Privacy
 
@@ -57,8 +57,8 @@ Merge a pull request into `main`, or run `deploy.yml` on `main` from the Actions
 run from another branch fails at its `deploy` job.
 
 Runs of `deploy.yml` wait for each other, and a newer run never cancels one in progress. A run that queues does
-cancel any run already waiting, even one for a newer commit of `main`. So when you dispatch or re-run a deploy
-while another one runs, check afterwards which commit is live:
+cancel any run already waiting, even one for a newer commit of `main`. If you dispatch or re-run a deploy while
+another one runs, check which commit is live afterwards:
 
 ```bash
 curl -sI -H 'Accept: text/html' https://mcp.tibia.sh/ | grep -i x-deploy-commit
@@ -76,8 +76,8 @@ Revert the change in a pull request and merge it. The merge runs CI and deploys 
 together, like any other merge.
 
 `wrangler rollback` is not a recovery path. It only deploys an older Worker version and leaves the container image
-in place, so a bad server or index keeps serving. It is a break-glass fix for a regression in the Worker alone,
-which the maintainer runs with their own Cloudflare login. Merge the revert pull request after it anyway, or the
+in place, so a bad server or index keeps serving. It is a break-glass fix for a regression in the Worker alone.
+The maintainer runs it with their own Cloudflare login. Merge the revert pull request after it anyway, or the
 next deploy brings the regression back.
 
 During a CI outage, the maintainer may disable the ruleset to merge the revert, then enable it again right after.
@@ -89,12 +89,14 @@ Each `wrangler` release pins its own `workerd`. When a bump changes that version
 `wrangler types --check`, because the generated types name the `workerd` version they came from. On the
 Dependabot branch:
 
-1. Run `npm ci --ignore-scripts`, then `npm ls workerd` to read the new version.
-2. Move `compatibility_date` in `wrangler.jsonc` to the newest date that version supports, which is the date in its
+1. Run `npm ci --ignore-scripts`.
+2. Run `npm ls workerd` to read the new version.
+3. Move `compatibility_date` in `wrangler.jsonc` to the newest date that version supports, which is the date in its
    version number: `2026-09-07` for `1.20260907.1`. A newer date can change how the Worker runs, and `worker` runs
    the Worker end to end with it.
-3. Run `npx wrangler types` to regenerate `worker-configuration.d.ts`. It needs no Cloudflare account.
-4. Run `npm run check:config`, which needs Docker, then push both files to the branch.
+4. Run `npx wrangler types` to regenerate `worker-configuration.d.ts`. It needs no Cloudflare account.
+5. Run `npm run check:config`. It needs Docker.
+6. Push both files to the branch.
 
 ## Lockfile ages
 
@@ -122,7 +124,7 @@ could rewrite the mail records of `tibia.sh`, or the TXT record that holds its M
 Certificates Write, they could change its certificates. If a deploy asks for one of these, the maintainer attaches
 `mcp.tibia.sh` to the Worker by hand as a Custom Domain instead.
 
-The first deploy settles this list, and this section changes if it shows otherwise.
+The first deploy settles this list. If it shows otherwise, this section changes.
 
 The token has no expiry, so it lasts until it is rotated or revoked. To rotate it:
 
