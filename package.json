@@ -20,7 +20,7 @@
     "@modelcontextprotocol/client": "2.0.0",
     "@types/node": "26.5.0",
     "typescript": "7.0.2",
-    "wrangler": "4.129.1",
+    "wrangler": "4.131.2",
     "yaml": "2.9.0"
   }
 }
