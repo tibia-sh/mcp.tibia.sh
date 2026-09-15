@@ -25,6 +25,8 @@ Anthropic's egress IPs, so they share one allowance.
 - This service writes no request logs. It writes only startup, sleep and error lines, with no data from your
   requests, and keeps them for 7 days.
 
+Cloudflare attaches the request URL to the Worker's log events, with your query string redacted.
+
 ## How a release reaches the endpoint
 
 1. A new `@tibia.sh/tibiawiki-mcp` or `@tibia.sh/tibiawiki-data` release reaches npm. Dependabot checks npm daily
