@@ -1,0 +1,68 @@
+name: ci
+
+# Runs on pull requests, and as the reusable workflow deploy.yml calls on the commit it deploys.
+# No job reads a secret, so Dependabot pull requests run every check. The job IDs are the
+# ruleset's required checks, so no job has a name: or an if:.
+on:
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      WRANGLER_SEND_METRICS: 'false'
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '26'
+      - run: npm ci --ignore-scripts
+      # Signatures are verified once per run, here. The other jobs install the same lockfile.
+      - run: npm audit signatures
+      # npm ci does not apply .npmrc's min-release-age, so the lockfile's release ages and
+      # first-party provenance are checked on every run.
+      - run: npm run check:lockfile
+      - run: npm run typecheck
+      - run: npm run test:unit
+
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      WRANGLER_SEND_METRICS: 'false'
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '26'
+      - run: npm ci --ignore-scripts
+      # Builds the image, runs it, and checks what it serves over HTTP.
+      - run: npm run test:container
+
+  worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      WRANGLER_SEND_METRICS: 'false'
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '26'
+      - run: npm ci --ignore-scripts
+      # wrangler types --check, then a deploy dry run, which bundles the Worker and builds the
+      # image without an account.
+      - run: npm run check:config
+      # The Worker end to end in wrangler dev, with local containers.
+      - run: npm run test:worker
