@@ -2,7 +2,7 @@
  * The bump script's rules against a fake registry, a fake clock and a fake command runner, and its CLI against
  * fake git, gh and pnpm scripts on PATH.
  *
- * The fixtures copy the shapes the npm registry and gh 2.100.0 produced on 2026-09-15: a packument's `versions` and
+ * The fixtures copy the shapes the npm registry and gh 2.100.0 produced on 2026-09-16: a packument's `versions` and
  * `time` maps, the attestations response, what `gh pr list --json number,isCrossRepository` and
  * `gh pr view --json state,autoMergeRequest` print. The fake registry rejects every URL it was not given, and the
  * fake runner records every command, so a rule that reads the wrong document or runs the wrong command fails its
