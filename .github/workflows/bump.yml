@@ -6,9 +6,9 @@ name: bump
 # container and worker pass, and the publish step waits for that merge, so a stalled pull request is a
 # red run. Runs queue and never cancel each other. GitHub keeps one waiting run per group by default and
 # replaces it with the next, which could drop a data release behind a server release, so queue: max keeps
-# every waiting run. A run that waited was given the main of its event time, so the step after the
-# checkout moves to the tip of main, where the previous run merged. To run it by hand from a checkout
-# of this repository, where gh runs it on main:
+# up to 100 waiting runs and starts them in the order they arrived. A run that waited was given the main
+# of its event time, so the step after the checkout moves to the tip of main, where the previous run
+# merged. To run it by hand from a checkout of this repository, where gh runs it on main:
 #   gh workflow run bump.yml -f package=@tibia.sh/tibiawiki-mcp -f version=1.2.3
 on:
   repository_dispatch:
@@ -42,7 +42,8 @@ jobs:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-      # The move to the tip of main, before the install and the scripts read anything.
+      # The move to the tip of main, before the install and the scripts read anything. The checkout kept no
+      # credentials, and the fetch needs none, since the repository is public.
       - run: git fetch --depth=1 origin main && git switch --detach FETCH_HEAD
       # This setup-node caches by itself whenever package.json names a packageManager, so it is
       # switched off by name.

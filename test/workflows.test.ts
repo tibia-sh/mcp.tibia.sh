@@ -354,6 +354,17 @@ test('no job or step in any workflow has an if: or continue-on-error, so a failu
   );
 });
 
+test('every job in every workflow runs on ubuntu-latest, apart from the job that calls ci.yml', () => {
+  // A job with a token on a self-hosted runner would put the token on a machine that is not GitHub's. The job
+  // that calls the reusable workflow has no runner of its own, and the jobs it calls are checked in ci.yml.
+  const elsewhere = workflows.flatMap(({ file, document }) =>
+    Object.entries(jobsOf(file, document))
+      .filter(([, job]) => job['uses'] !== LOCAL_CI && job['runs-on'] !== 'ubuntu-latest')
+      .map(([id, job]) => `${file} jobs.${id}: ${JSON.stringify(job['runs-on'])}`),
+  );
+  assert.deepEqual(elsewhere, []);
+});
+
 test('no job in any workflow has a static name: of a required check', () => {
   const shadowing = workflows.flatMap(({ file, document }) =>
     Object.entries(jobsOf(file, document))
@@ -424,9 +435,9 @@ test("bump.yml's one job is bump, in release-trigger, bounded at 45 minutes, wit
   });
 });
 
-test('bump.yml runs in the concurrency group bump, which never cancels a run and keeps every waiting run', () => {
+test('bump.yml runs in the concurrency group bump, which never cancels a run and queues up to 100 in order', () => {
   // GitHub keeps one waiting run per group unless queue is max, and replaces it with the next one, which could drop
-  // a data release behind a server release. With queue: max every run waits its turn, one after the other.
+  // a data release behind a server release. With queue: max up to 100 runs wait, and start in the order they arrived.
   const document = workflow('bump.yml');
   assert.deepEqual(isMapping(document) ? document['concurrency'] : undefined, {
     group: 'bump',
