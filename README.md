@@ -31,15 +31,15 @@ Cloudflare attaches the request URL to the Worker's log events, with your query 
 
 1. A new `@tibia.sh/tibiawiki-mcp` or `@tibia.sh/tibiawiki-data` release reaches npm. A pull request bumps the
    `@tibia.sh/*` pins. Until the release trigger lands, open it by hand with
-   `npm install --save-exact --ignore-scripts <package>@<version>`.
+   `pnpm add --save-exact <package>@<version>`.
 2. CI runs the required checks `unit`, `container` and `worker` on the pull request. No job reads a secret, so
    every pull request runs every check. `container` builds the image and checks that it serves the pinned server
    version and index.
 3. You merge the pull request once the checks pass. The push to `main` runs `deploy.yml`:
    - `ci` runs the same checks on the merged commit.
-   - `deploy` runs `npm audit signatures`, then `wrangler deploy` with the token of the `cloudflare-production`
-     environment. wrangler builds and pushes the image, and deploys the Worker with the merged commit as its
-     `DEPLOY_COMMIT`.
+   - `deploy` runs `pnpm audit signatures`, then `pnpm exec wrangler deploy` with the token of the
+     `cloudflare-production` environment. wrangler builds and pushes the image, and deploys the Worker with the
+     merged commit as its `DEPLOY_COMMIT`.
    - `smoke` runs `scripts/served-artifact.ts` without the token. It passes once the landing page answers with the
      merged commit in `x-deploy-commit`, and `/wiki` serves the pinned server version and index. It starts no new
      attempt after 10 minutes.
@@ -91,20 +91,21 @@ The merge's deploy still waits for `ci` to pass on the merged commit.
 Each `wrangler` release pins its own `workerd`. When a bump changes that version, `worker` fails at
 `wrangler types --check`, because the generated types name the `workerd` version they came from. On your branch:
 
-1. Run `npm ci --ignore-scripts`.
-2. Run `npm ls workerd` to read the new version.
+1. Run `pnpm install --frozen-lockfile`.
+2. Run `pnpm why workerd` to read the new version.
 3. Move `compatibility_date` in `wrangler.jsonc` to the newest date that version supports, which is the date in its
    version number: `2026-09-07` for `1.20260907.1`. A newer date can change how the Worker runs, and `worker` runs
    the Worker end to end with it.
-4. Run `npx wrangler types` to regenerate `worker-configuration.d.ts`. It needs no Cloudflare account.
-5. Run `npm run check:config`. It needs Docker.
+4. Run `pnpm exec wrangler types` to regenerate `worker-configuration.d.ts`. It needs no Cloudflare account.
+5. Run `pnpm run check:config`. It needs Docker.
 6. Push both files to the branch.
 
 ## Lockfile ages
 
-`npm ci` installs the lockfile without applying the `min-release-age` in `.npmrc`, so `unit` runs
-`npm run check:lockfile`. It fails on any lockfile entry outside `@tibia.sh/*` that is younger than 7 days, and on
-any `@tibia.sh/*` entry without provenance from a `tibia-sh` repository.
+pnpm applied the 7-day release age in `pnpm-workspace.yaml` when it wrote the lockfile. `unit` runs
+`pnpm run check:lockfile` on every run. It fails on any lockfile entry outside `@tibia.sh/*` that is younger than
+7 days, and on any `@tibia.sh/*` entry without a provenance bundle that `gh attestation verify` accepts for the
+package's release workflow on `main`.
 
 A pull request that brings in a younger entry waits until the entry is 7 days old. Re-run `unit` then.
 
@@ -141,10 +142,10 @@ The token has no expiry, so it lasts until it is rotated or revoked. To rotate i
 1. Release `tibiawiki-mcp` without `remotes` in its `server.json`, so the MCP registry's latest version stops
    listing `https://mcp.tibia.sh/wiki` before the URL goes dead.
 2. From a checkout of this repository, with your own Cloudflare login, delete the Worker with
-   `npx wrangler delete`. That also removes its custom domain and its Durable Object namespace, but not the
-   container application.
-3. Delete the container application with `npx wrangler containers delete <ID>`, taking the ID from
-   `npx wrangler containers list`.
-4. Delete each image tag with `npx wrangler containers images delete <IMAGE>:<TAG>`, taking them from
-   `npx wrangler containers images list`.
+   `pnpm exec wrangler delete`. That also removes its custom domain and its Durable Object namespace, but not
+   the container application.
+3. Delete the container application with `pnpm exec wrangler containers delete <ID>`, taking the ID from
+   `pnpm exec wrangler containers list`.
+4. Delete each image tag with `pnpm exec wrangler containers images delete <IMAGE>:<TAG>`, taking them from
+   `pnpm exec wrangler containers images list`.
 5. Revoke the deploy token, so a later merge cannot deploy the service again.
