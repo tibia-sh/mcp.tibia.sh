@@ -2,8 +2,8 @@
  * The landing page's content: the URL to add, both source repos, the privacy note, the deployed versions and the
  * attribution.
  *
- * The versions come from package.json and the attribution from the installed server, so a Dependabot bump that
- * changes either one fails here until the page follows.
+ * The versions come from package.json and the attribution from the installed server, so a pin bump that changes
+ * either one fails here until the page follows.
  */
 import { ATTRIBUTION } from '@tibia.sh/tibiawiki-mcp/dist/server.js';
 import assert from 'node:assert/strict';
