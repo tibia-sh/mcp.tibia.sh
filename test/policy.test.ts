@@ -41,7 +41,7 @@ const MCP_ACCEPT = 'application/json, text/event-stream';
 /** The CORS headers of every answer of the MCP endpoint but the landing page. */
 const ENDPOINT_CORS = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': '*',
   'Access-Control-Expose-Headers': 'Retry-After',
   'Access-Control-Max-Age': '86400',
