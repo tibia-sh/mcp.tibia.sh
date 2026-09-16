@@ -68,9 +68,9 @@ What can go wrong, and what to do:
 
 | What you see | What to do |
 |---|---|
-| Red CI on the bump pull request | The `bump` run ends red at the wait for the merge. Push the fix to the bump branch, and auto-merge merges it once the checks pass. Or close the pull request, fix the cause on `main`, and run `bump.yml` by hand. |
+| Red CI on the bump pull request | The `bump` run turns red after 30 minutes, when its wait for the merge runs out, so act on the red checks without waiting for it. Push the fix to the bump branch, and auto-merge merges it once the checks pass. Or close the pull request, fix the cause on `main`, and run `bump.yml` by hand. |
 | A bump pull request closed, or open past 30 minutes | The `bump` run is red. Fix the cause, then run `bump.yml` by hand. It reuses an open pull request and turns auto-merge on again, or opens a new one. |
-| A version still under a cooldown | The `pin` step fails at `pnpm add` when no version of some dependency is both in the range the release asks for and 7 days old, so the run is red before a pull request exists. Wait until one is, then run `bump.yml` by hand. |
+| A version still under a cooldown | The first-party packages skip the 7-day cooldown, and only their dependencies wait for it. The `pin` step fails at `pnpm add` when no version of some dependency is both in the range the release asks for and 7 days old, so the run is red before a pull request exists. Wait until one is, then run `bump.yml` by hand. |
 | A red `hosting` job in a release run | npm and the MCP registry are unaffected. The dispatch may still have arrived, so look for a `bump` run for that version in this repository's Actions tab, and run `bump.yml` by hand if there is none. A second run is harmless. It finds the version pinned, or the pull request open. |
 
 Nothing bumps the other dependencies for you. You bump `wrangler` and the other npm packages, the base image digest
@@ -169,8 +169,8 @@ The token has no expiry, so it lasts until it is rotated or revoked. To rotate i
 
 ## The release trigger token
 
-`HOSTING_DISPATCH_TOKEN` is a fine-grained personal access token of the maintainer, with `tibia-sh` as its resource
-owner and `mcp.tibia.sh` as the only repository it can reach. It is a secret of the `release-trigger` environment
+`HOSTING_DISPATCH_TOKEN` is your fine-grained personal access token, with `tibia-sh` as its resource owner and
+`mcp.tibia.sh` as the only repository it can reach. It is a secret of the `release-trigger` environment
 in each of the three repositories, `mcp.tibia.sh`, `tibiawiki-mcp` and `tibiawiki-data`, and each of those
 environments deploys from `main` only. The `publish` step of `bump.yml` reads it here. The `hosting` job of each
 release workflow reads it there, to send the dispatch.
@@ -183,22 +183,24 @@ The token holds these permissions on `mcp.tibia.sh`:
 | Pull requests | Read and write |
 | Metadata | Read, which GitHub adds to every fine-grained token |
 
-The maintainer picks the token's lifetime when they create it. The organization's token policy caps a fine-grained
-token at 366 days by default, so the token expires within 366 days of its creation unless the maintainer raised that
-cap first and chose no expiry. The token's own page on GitHub shows its date. Once it expires, the `hosting` jobs and
-the `publish` step fail until you rotate it, so rotate before that date.
+You pick the token's lifetime when you create it. The organization's token policy caps a fine-grained token at 366
+days by default, so the token expires within 366 days of its creation unless you raised that cap first and chose no
+expiry. The token's own page on GitHub shows its date. Once it expires, the `hosting` jobs and the `publish` step
+fail until you rotate it, so rotate before that date.
 
 The token means control of what the endpoint serves. The ruleset merges any pull request whose required checks
 pass, and those checks run the pull request's own scripts and tests, so a holder can push a branch whose checks
 pass by construction, open the pull request, turn on auto-merge, and land whatever `src/`, `Dockerfile`,
 `wrangler.jsonc` or lockfile they like on `main`. The merge deploys it, and a build command in `wrangler.jsonc` or a
-dependency standing in for wrangler would run in the deploy step next to the Cloudflare token. The token is the
-maintainer's own identity, so no rule can tell its pull requests from theirs. It cannot push to `main` directly,
-read a secret through the API, or touch the other two repositories, and without the Workflows permission it cannot
-change a workflow file. The maintainer accepted that trade-off.
+dependency standing in for wrangler would run in the deploy step next to the Cloudflare token. The token is your
+own identity, so no rule can tell its pull requests from yours. It cannot push to `main` directly, read a secret
+through the API, or touch the other two repositories, and without the Workflows permission it cannot change a
+workflow file. The maintainer accepted that trade-off.
 
-If this token leaks: revoke it, rotate the Cloudflare token as [The deploy token](#the-deploy-token) describes, and
-check what `main` holds and what the endpoint serves, with the `curl` in [Deploy](#deploy).
+If this token leaks, revoke it first. Then check what `main` holds and what the endpoint serves, with the `curl` in
+[Deploy](#deploy), and revert anything you did not land yourself in a revert pull request, whose merge deploys. Only
+then rotate the Cloudflare token as [The deploy token](#the-deploy-token) describes, since that rotation deploys
+`main` again, and the new token would otherwise run next to whatever the holder landed.
 
 To rotate it:
 
@@ -219,4 +221,5 @@ To rotate it:
    `pnpm exec wrangler containers list`.
 4. Delete each image tag with `pnpm exec wrangler containers images delete <IMAGE>:<TAG>`, taking them from
    `pnpm exec wrangler containers images list`.
-5. Revoke the deploy token, so a later merge cannot deploy the service again.
+5. Revoke the deploy token, so a later merge cannot deploy the service again, and the release trigger token too, or
+   a later first-party release keeps opening bump pull requests here.
