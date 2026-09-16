@@ -1,0 +1,29 @@
+savePrefix: ''
+minimumReleaseAge: 10080
+# Strict is pnpm's default once minimumReleaseAge is set, and it is stated here so the
+# cooldown fails a resolution instead of falling back to an immature version.
+minimumReleaseAgeStrict: true
+# The first-party packages skip the 7-day cooldown. This repo pins each @tibia.sh release
+# minutes after it is published, and pnpm fails such an install rather than waiting. The
+# cooldown exists to let the ecosystem catch a compromised upstream release. A first-party
+# release is gated by its own release workflow instead, and scripts/check-lockfile.ts
+# verifies each pin's provenance against that workflow on every CI run.
+minimumReleaseAgeExclude:
+  - '@tibia.sh/*'
+trustPolicy: no-downgrade
+blockExoticSubdeps: true
+strictDepBuilds: true
+# The three packages with an install script, each denied. esbuild and workerd only check
+# for the platform binary that arrives as an optional dependency, and download it when it
+# is missing. fsevents ships its prebuilt fsevents.node. All three come with wrangler, so
+# the image never installs them, and wrangler runs with the binaries pnpm already put in
+# place. With strictDepBuilds, pnpm fails on any other package that asks to build, so you
+# review it here instead of letting it run unseen.
+allowBuilds:
+  esbuild: false
+  fsevents: false
+  workerd: false
+verifyDepsBeforeRun: error
+# pnpm 11 replaced packageManagerStrictVersion and managePackageManagerVersions with this.
+# A pnpm other than packageManager's switches to that exact version.
+pmOnFail: download
