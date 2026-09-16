@@ -1,0 +1,66 @@
+name: bump
+
+# Pins a first-party release and gets the pull request that pins it merged. The release workflows of
+# tibiawiki-mcp and tibiawiki-data send first-party-release once npm accepted a publish, with the package
+# and the version in the payload. CI on the pull request is the gate. The ruleset merges it once unit,
+# container and worker pass, and the publish step waits for that merge, so a stalled pull request is a
+# red run. Runs queue and never cancel each other. GitHub keeps one waiting run per group by default and
+# replaces it with the next, which could drop a data release behind a server release, so queue: max keeps
+# every waiting run. A run that waited was given the main of its event time, so the step after the
+# checkout moves to the tip of main, where the previous run merged. To run it by hand from a checkout
+# of this repository, where gh runs it on main:
+#   gh workflow run bump.yml -f package=@tibia.sh/tibiawiki-mcp -f version=1.2.3
+on:
+  repository_dispatch:
+    types: [first-party-release]
+  workflow_dispatch:
+    inputs:
+      package:
+        description: '@tibia.sh/tibiawiki-mcp or @tibia.sh/tibiawiki-data'
+        required: true
+      version:
+        description: The version to pin, as npm names it
+        required: true
+
+permissions:
+  contents: read
+
+concurrency: { group: bump, cancel-in-progress: false, queue: max }
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: release-trigger
+    # The payload is untrusted. It reaches the scripts as arguments read from these two variables, never
+    # as text of a command line, and the scripts refuse anything but a first-party package and an exact
+    # version.
+    env:
+      PACKAGE: ${{ github.event_name == 'workflow_dispatch' && inputs.package || github.event.client_payload.package }}
+      VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.event.client_payload.version }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      # The move to the tip of main, before the install and the scripts read anything.
+      - run: git fetch --depth=1 origin main && git switch --detach FETCH_HEAD
+      # This setup-node caches by itself whenever package.json names a packageManager, so it is
+      # switched off by name.
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '26'
+          package-manager-cache: false
+      # Installs the pnpm that packageManager names, then runs `pnpm install --frozen-lockfile`.
+      - uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
+        with:
+          install: true
+          require-lockfile: true
+      # Without the token. Waits for npm to serve the version with provenance, pins it with pnpm add and
+      # runs the lockfile check on the result. The pinned version ends it with already-pinned.
+      - run: node scripts/bump.ts pin "$PACKAGE" "$VERSION"
+      # The only step that gets the token. Opens the pull request from bump/<name>-<version>, or reuses
+      # the open one, turns auto-merge on and waits for the merge. Unchanged files end it with
+      # nothing-to-publish.
+      - run: node scripts/bump.ts publish "$PACKAGE" "$VERSION"
+        env:
+          GH_TOKEN: ${{ secrets.HOSTING_DISPATCH_TOKEN }}
