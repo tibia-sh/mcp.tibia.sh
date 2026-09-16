@@ -18,6 +18,13 @@ batch counts. A request for the server card counts as one message. Past the limi
 The limit is approximate. Cloudflare counts it per location and applies it permissively. claude.ai users share
 Anthropic's egress IPs, so they share one allowance.
 
+In front of the Worker, a WAF rate limiting rule on the `tibia.sh` zone blocks an IP for 10 s once it has sent
+more than 200 requests in 10 s, whatever the path or the answer. It is the Free plan's one rule, created on
+2026-09-16 (ruleset `71d2118739af4571a02d729c6ea41111`, rule `c18c933621b3469a8d92dfb6650c3f50`), and it
+matches every path because the plan offers no host field. The zone serves only `mcp.tibia.sh`, so that is the
+same thing. A blocked request gets Cloudflare's own `429` page, not the Worker's answer. The rule lives in the
+Cloudflare dashboard under Security, WAF, Rate limiting rules, not in this repository.
+
 ## Browser clients
 
 The endpoint answers CORS preflights and allows any origin, so an MCP client that runs in a browser needs no
