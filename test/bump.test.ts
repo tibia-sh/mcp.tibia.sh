@@ -13,11 +13,11 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { setImmediate } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { compareWithPin, parseRequest, pin, publish, waitForNpm } from '../scripts/bump.ts';
+import { compareWithPin, parseRequest, pin, publish, run, waitForNpm } from '../scripts/bump.ts';
 import type { Outcome, Run } from '../scripts/bump.ts';
 import { FIRST_PARTY, FIRST_PARTY_SCOPE } from '../scripts/first-party.ts';
 
@@ -105,7 +105,7 @@ function fakeClock(start = Date.parse('2026-09-15T12:00:00.000Z')) {
   };
 }
 
-type Call = { command: string; args: string[] };
+type Call = { command: string; args: string[]; timeoutMs: number | undefined };
 
 /** A recorded call as one list, the way the tests spell the expected commands. */
 function line(call: Call): string[] {
@@ -118,18 +118,23 @@ function line(call: Call): string[] {
  */
 function fakeRun(respond: (call: Call) => Partial<Outcome> | undefined = () => undefined) {
   const calls: Call[] = [];
-  const run: Run = async (command, args) => {
-    const call = { command, args };
+  const run: Run = async (command, args, timeoutMs) => {
+    const call = { command, args, timeoutMs };
     calls.push(call);
     await setImmediate();
     return { status: 0, stdout: '', stderr: '', ...respond(call) };
   };
-  return { run, calls, lines: () => calls.map(line) };
+  return { run, calls, lines: () => calls.map(line), bounds: () => calls.map((call) => call.timeoutMs) };
 }
 
 /** Whether a call is the given command with the given leading arguments. */
 function starts(call: Call, ...expected: string[]): boolean {
   return expected.every((word, index) => line(call)[index] === word);
+}
+
+/** The text as a RegExp source matching it literally. */
+function literal(text: string): string {
+  return text.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
 }
 
 describe('parseRequest', () => {
@@ -333,7 +338,7 @@ describe('pin', () => {
   };
 
   /** Runs pin for MCP at version with a package.json of the given pins, a registry, and a runner, or defaults. */
-  function run(version: string, fakes: Fakes = {}) {
+  function pinning(version: string, fakes: Fakes = {}) {
     const registry = fakeRegistry(fakes.registry ?? SERVING);
     const runner = fakes.run ?? fakeRun();
     const clock = fakeClock();
@@ -343,7 +348,7 @@ describe('pin', () => {
   }
 
   test('the pinned version is already-pinned, and touches neither npm nor pnpm', async () => {
-    const { outcome, registry, run: runner, clock } = run('0.6.0');
+    const { outcome, registry, run: runner, clock } = pinning('0.6.0');
     assert.equal(await outcome, 'already-pinned');
     assert.deepEqual(registry.requests, []);
     assert.deepEqual(runner.calls, []);
@@ -351,14 +356,14 @@ describe('pin', () => {
   });
 
   test('a lower version is refused, naming the pin, and touches neither npm nor pnpm', async () => {
-    const { outcome, registry, run: runner } = run('0.5.9');
+    const { outcome, registry, run: runner } = pinning('0.5.9');
     await assert.rejects(outcome, { message: 'refuses to move @tibia.sh/tibiawiki-mcp from 0.6.0 down to 0.5.9' });
     assert.deepEqual(registry.requests, []);
     assert.deepEqual(runner.calls, []);
   });
 
   test('a package.json without the pin is rejected before anything runs', async () => {
-    const { outcome, registry, run: runner } = run('0.6.1', { pins: { [DATA]: '3.0.3' } });
+    const { outcome, registry, run: runner } = pinning('0.6.1', { pins: { [DATA]: '3.0.3' } });
     await assert.rejects(outcome, { message: /no such dependency/ });
     assert.deepEqual(registry.requests, []);
     assert.deepEqual(runner.calls, []);
@@ -369,17 +374,18 @@ describe('pin', () => {
       [packumentUrl(MCP)]: [packument(MCP, ['0.6.0']), packument(MCP, ['0.6.0', '0.6.1'])],
       [attestationsUrl(MCP, '0.6.1')]: [attestations()],
     };
-    const { outcome, run: runner, clock } = run('0.6.1', { registry });
+    const { outcome, run: runner, clock } = pinning('0.6.1', { registry });
     assert.equal(await outcome, 'pinned');
     assert.deepEqual(clock.sleeps, [15 * SECOND_MS]);
     assert.deepEqual(runner.lines(), [ADD, CHECK]);
+    assert.deepEqual(runner.bounds(), [undefined, undefined], 'pnpm add and the lockfile check are not bounded');
   });
 
   test('a pnpm add that fails stops the pin with its stderr, before the lockfile check', async () => {
     const stderr = ' ERR_PNPM_NO_MATCHING_VERSION  No matching version found\n';
     const failing = { status: 1, stdout: 'Progress: resolved 1', stderr };
     const runner = fakeRun((call) => (starts(call, 'pnpm') ? failing : undefined));
-    await assert.rejects(run('0.6.1', { run: runner }).outcome, {
+    await assert.rejects(pinning('0.6.1', { run: runner }).outcome, {
       message: `pnpm add --save-exact ${MCP}@0.6.1 exited 1: ERR_PNPM_NO_MATCHING_VERSION  No matching version found`,
     });
     assert.deepEqual(runner.lines(), [ADD]);
@@ -388,7 +394,7 @@ describe('pin', () => {
   test('a lockfile check that fails stops the pin with its stderr', async () => {
     const stderr = `${MCP}@0.6.1: gh attestation verify: Error: verifying with issuer "sigstore.dev"\n`;
     const runner = fakeRun((call) => (starts(call, 'node') ? { status: 1, stderr } : undefined));
-    await assert.rejects(run('0.6.1', { run: runner }).outcome, {
+    await assert.rejects(pinning('0.6.1', { run: runner }).outcome, {
       message: `node scripts/check-lockfile.ts exited 1: ${stderr.trim()}`,
     });
     assert.deepEqual(runner.lines(), [ADD, CHECK]);
@@ -396,16 +402,18 @@ describe('pin', () => {
 
   test('a command killed by a signal, or one that fails without a word, still fails the pin', async () => {
     const killed = fakeRun((call) => (starts(call, 'pnpm') ? { status: null } : undefined));
-    await assert.rejects(run('0.6.1', { run: killed }).outcome, {
+    await assert.rejects(pinning('0.6.1', { run: killed }).outcome, {
       message: `pnpm add --save-exact ${MCP}@0.6.1 was killed by a signal`,
     });
     const silent = fakeRun((call) => (starts(call, 'node') ? { status: 2 } : undefined));
-    await assert.rejects(run('0.6.1', { run: silent }).outcome, { message: 'node scripts/check-lockfile.ts exited 2' });
+    await assert.rejects(pinning('0.6.1', { run: silent }).outcome, {
+      message: 'node scripts/check-lockfile.ts exited 2',
+    });
   });
 
   test('npm not serving the version in time fails the pin before pnpm runs', async () => {
     const registry = { [packumentUrl(MCP)]: [packument(MCP, ['0.6.0'])] };
-    const { outcome, run: runner } = run('0.6.1', { registry });
+    const { outcome, run: runner } = pinning('0.6.1', { registry });
     await assert.rejects(outcome, { message: /npm does not serve/ });
     assert.deepEqual(runner.calls, []);
   });
@@ -473,21 +481,21 @@ describe('publish', () => {
   }
 
   /** Runs publish with the fakes, and a fake clock. */
-  function run(fakes: Fakes) {
+  function publishing(fakes: Fakes) {
     const github = fakeGitHub(fakes);
     const clock = fakeClock();
     return { outcome: publish(request, { run: github.run, ...clock }), github, clock };
   }
 
   test('unchanged pins are nothing-to-publish, and nothing else runs', async () => {
-    const { outcome, github, clock } = run({ unchanged: true, views: [] });
+    const { outcome, github, clock } = publishing({ unchanged: true, views: [] });
     assert.equal(await outcome, 'nothing-to-publish');
     assert.deepEqual(github.lines(), [DIFF]);
     assert.deepEqual(clock.sleeps, []);
   });
 
   test('creates the branch, the commit and the pull request, turns auto-merge on, and waits to merge', async () => {
-    const { outcome, github, clock } = run({ views: [OPEN_OFF, OPEN_ON, MERGED] });
+    const { outcome, github, clock } = publishing({ views: [OPEN_OFF, OPEN_ON, MERGED] });
     assert.equal(await outcome, 'merged');
     const { bodyFile, body } = github.created;
     assert.ok(bodyFile !== undefined && bodyFile.startsWith(tmpdir()), `the body file ${bodyFile} is under tmpdir`);
@@ -495,43 +503,57 @@ describe('publish', () => {
     assert.equal(existsSync(bodyFile), false, 'the body file is removed');
     assert.deepEqual(github.lines(), [DIFF, LIST, ...CREATE(bodyFile), VIEW, MERGE, VIEW, VIEW]);
     assert.deepEqual(clock.sleeps, [30 * SECOND_MS, 30 * SECOND_MS]);
+    assert.deepEqual(github.bounds(), Array(12).fill(120 * SECOND_MS), 'every git and gh command is bounded');
+  });
+
+  test('a pull request found merged before the wait is merged, without enabling auto-merge or waiting', async () => {
+    const { outcome, github, clock } = publishing({ open: [11], views: [MERGED] });
+    assert.equal(await outcome, 'merged');
+    assert.deepEqual(github.lines(), [DIFF, LIST, VIEW]);
+    assert.deepEqual(clock.sleeps, []);
+  });
+
+  test('a pull request found closed before the wait fails the same way', async () => {
+    const { outcome, github } = publishing({ open: [11], views: [CLOSED] });
+    await assert.rejects(outcome, { message: `the pull request from ${branch} was closed without merging` });
+    assert.deepEqual(github.lines(), [DIFF, LIST, VIEW]);
   });
 
   test('reuses the open pull request, and leaves auto-merge alone when it is on', async () => {
-    const { outcome, github } = run({ open: [11], views: [OPEN_ON, MERGED] });
+    const { outcome, github } = publishing({ open: [11], views: [OPEN_ON, MERGED] });
     assert.equal(await outcome, 'merged');
     assert.deepEqual(github.lines(), [DIFF, LIST, VIEW, VIEW]);
     assert.equal(github.created.body, undefined);
   });
 
   test('reuses the open pull request, and turns auto-merge on when it is off', async () => {
-    const { outcome, github } = run({ open: [11], views: [OPEN_OFF, MERGED] });
+    const { outcome, github } = publishing({ open: [11], views: [OPEN_OFF, MERGED] });
     assert.equal(await outcome, 'merged');
     assert.deepEqual(github.lines(), [DIFF, LIST, VIEW, MERGE, VIEW]);
   });
 
   test('a pull request found closed fails the wait, naming it', async () => {
-    const { outcome, github, clock } = run({ open: [11], views: [OPEN_ON, OPEN_ON, CLOSED] });
+    const { outcome, github, clock } = publishing({ open: [11], views: [OPEN_ON, OPEN_ON, CLOSED] });
     await assert.rejects(outcome, { message: `the pull request from ${branch} was closed without merging` });
     assert.deepEqual(github.lines(), [DIFF, LIST, VIEW, VIEW, VIEW]);
     assert.deepEqual(clock.sleeps, [30 * SECOND_MS, 30 * SECOND_MS]);
   });
 
   test('auto-merge found off during the wait is turned on once more, and fails the wait the second time', async () => {
-    const reused = run({ open: [11], views: [OPEN_ON, OPEN_OFF, OPEN_ON, OPEN_OFF, OPEN_ON] });
+    const reused = publishing({ open: [11], views: [OPEN_ON, OPEN_OFF, OPEN_ON, OPEN_OFF, OPEN_ON] });
     await assert.rejects(reused.outcome, {
       message: `auto-merge on the pull request from ${branch} was found off a second time`,
     });
     assert.deepEqual(reused.github.lines(), [DIFF, LIST, VIEW, VIEW, MERGE, VIEW, VIEW]);
     // Turning it on before the wait does not count: the wait still turns it on once more.
-    const created = run({ views: [OPEN_OFF, OPEN_OFF, OPEN_OFF] });
+    const created = publishing({ views: [OPEN_OFF, OPEN_OFF, OPEN_OFF] });
     await assert.rejects(created.outcome, { message: /found off a second time/ });
     const opened = CREATE(created.github.created.bodyFile as string);
     assert.deepEqual(created.github.lines(), [DIFF, LIST, ...opened, VIEW, MERGE, VIEW, MERGE, VIEW]);
   });
 
   test('the wait ends 30 minutes after it began, naming the pull request', async () => {
-    const { outcome, github, clock } = run({ open: [11], views: [OPEN_ON] });
+    const { outcome, github, clock } = publishing({ open: [11], views: [OPEN_ON] });
     await assert.rejects(outcome, {
       message: `the pull request from ${branch} has not merged 30 minutes after the wait began`,
     });
@@ -540,7 +562,7 @@ describe('publish', () => {
   });
 
   test('a merge found at the last poll still resolves merged', async () => {
-    const { outcome, clock } = run({ open: [11], views: [...Array<string>(POLLS).fill(OPEN_ON), MERGED] });
+    const { outcome, clock } = publishing({ open: [11], views: [...Array<string>(POLLS).fill(OPEN_ON), MERGED] });
     assert.equal(await outcome, 'merged');
     assert.equal(clock.sleeps.length, POLLS);
   });
@@ -552,9 +574,9 @@ describe('publish', () => {
     function slow(views: string[]) {
       const github = fakeGitHub({ open: [11], views });
       const clock = fakeClock();
-      const slowRun: Run = (command, args) => {
-        if (starts({ command, args }, 'gh', 'pr', 'view')) clock.advance(17 * SECOND_MS);
-        return github.run(command, args);
+      const slowRun: Run = (command, args, timeoutMs) => {
+        if (starts({ command, args, timeoutMs }, 'gh', 'pr', 'view')) clock.advance(17 * SECOND_MS);
+        return github.run(command, args, timeoutMs);
       };
       return { outcome: publish(request, { run: slowRun, ...clock }), github, clock };
     }
@@ -569,13 +591,13 @@ describe('publish', () => {
 
   test('a command that fails stops publish with its stderr, and nothing after it runs', async () => {
     const denied = 'remote: Permission to tibia-sh/mcp.tibia.sh.git denied';
-    const push = run({ views: [], fail: { call: ['git', 'push'], stderr: `${denied}\n` } });
+    const push = publishing({ views: [], fail: { call: ['git', 'push'], stderr: `${denied}\n` } });
     await assert.rejects(push.outcome, {
       message: `git push --force origin HEAD:refs/heads/${branch} exited 1: ${denied}`,
     });
     assert.deepEqual(push.github.lines(), [DIFF, LIST, ...CREATE('').slice(0, 5)]);
     assert.equal(push.github.created.body, undefined);
-    const merge = run({ open: [11], views: [OPEN_OFF], fail: { call: ['gh', 'pr', 'merge'], stderr: 'no\n' } });
+    const merge = publishing({ open: [11], views: [OPEN_OFF], fail: { call: ['gh', 'pr', 'merge'], stderr: 'no\n' } });
     await assert.rejects(merge.outcome, { message: `gh pr merge --auto --rebase ${branch} exited 1: no` });
     assert.deepEqual(merge.github.lines(), [DIFF, LIST, VIEW, MERGE]);
   });
@@ -597,8 +619,8 @@ describe('publish', () => {
       '{"autoMergeRequest":"yes","state":"OPEN"}',
     ];
     for (const printed of answers) {
-      const { outcome } = run({ open: [11], views: [printed] });
-      const quoted = JSON.stringify(`${printed}\n`).replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
+      const { outcome } = publishing({ open: [11], views: [printed] });
+      const quoted = literal(JSON.stringify(`${printed}\n`));
       await assert.rejects(outcome, {
         message: new RegExp(`^gh pr view ${branch} --json state,autoMergeRequest printed ${quoted}, `),
       });
@@ -608,6 +630,35 @@ describe('publish', () => {
       message: /^gh pr list --head .* --jq \.\[\]\.number printed "a pull request\\n", /,
     });
     assert.deepEqual(listed.lines(), [DIFF, LIST]);
+  });
+});
+
+describe('the real run', () => {
+  let scratch: string;
+  before(async () => {
+    scratch = await mkdtemp(join(tmpdir(), 'bump-run-test-'));
+  });
+  after(async () => {
+    await rm(scratch, { recursive: true, force: true });
+  });
+
+  test('a bounded command that answers in time resolves with its exit status', async () => {
+    assert.deepEqual(await run('/bin/sh', ['-c', 'exit 3'], 5 * SECOND_MS), { status: 3, stdout: '', stderr: '' });
+  });
+
+  test('a command that gives no answer within the bound is killed, and is gone when the promise settles', async () => {
+    // The fake records its pid, ignores SIGTERM, and keeps that disposition through exec, so only a kill ends it.
+    // With no arguments it exits at once: macOS scans a new executable on its first run, which can take 200 ms,
+    // so the test runs it once before the timed run.
+    const pidFile = join(scratch, 'sleeper-pid');
+    const sleeper = join(scratch, 'sleeper');
+    const script = `#!/bin/sh\n[ $# -eq 0 ] && exit 0\ntrap '' TERM\necho $$ > '${pidFile}'\nexec sleep 30\n`;
+    await writeFile(sleeper, script, { mode: 0o755 });
+    assert.equal(spawnSync(sleeper, { stdio: 'ignore' }).status, 0);
+    await assert.rejects(run(sleeper, ['sleep'], 200), { message: `${sleeper} gave no answer within 0.2 s` });
+    const pid = Number(readFileSync(pidFile, 'utf8').trim());
+    assert.ok(pid > 0, 'the fake recorded its pid');
+    assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
   });
 });
 
@@ -630,13 +681,15 @@ describe('the CLI', () => {
     empty = join(scratch, 'empty');
     await mkdir(bin);
     await mkdir(empty);
-    // The fakes log each call to FAKE_LOG. git diff exits FAKE_DIFF_STATUS, and says so on stdout, when that is
-    // set. gh records the GH_TOKEN it was given in FAKE_TOKEN_SEEN, and gh pr list fails with FAKE_LIST_FAIL on
-    // stderr, when those are set. None of them touches the network or the repository.
+    // The fakes log each call to FAKE_LOG, and their working directory to FAKE_CWD when that is set. git diff
+    // exits FAKE_DIFF_STATUS, and says so on stdout, when that is set. gh records the GH_TOKEN it was given in
+    // FAKE_TOKEN_SEEN, gh pr list fails with FAKE_LIST_FAIL on stderr, and gh pr view prints FAKE_VIEW, when
+    // those are set. None of them touches the network or the repository.
     await writeFile(
       join(bin, 'git'),
       `#!/bin/sh
 printf 'git %s\\n' "$*" >> "$FAKE_LOG"
+[ -n "\${FAKE_CWD-}" ] && printf '%s\\n' "$PWD" >> "$FAKE_CWD"
 if [ "$1" = diff ] && [ -n "\${FAKE_DIFF_STATUS-}" ]; then
   printf 'fake git: %s\\n' "$*"
   exit "$FAKE_DIFF_STATUS"
@@ -649,10 +702,17 @@ exit 0
       join(bin, 'gh'),
       `#!/bin/sh
 printf 'gh %s\\n' "$*" >> "$FAKE_LOG"
+[ -n "\${FAKE_CWD-}" ] && printf '%s\\n' "$PWD" >> "$FAKE_CWD"
 [ -n "\${FAKE_TOKEN_SEEN-}" ] && printf '%s\\n' "\${GH_TOKEN-unset}" > "$FAKE_TOKEN_SEEN"
 if [ "$1 $2" = "pr list" ] && [ -n "\${FAKE_LIST_FAIL-}" ]; then
   printf '%s\\n' "$FAKE_LIST_FAIL" >&2
   exit 1
+fi
+if [ "$1 $2" = "pr view" ] && [ -n "\${FAKE_VIEW-}" ]; then
+  printf '%s\\n' "$FAKE_VIEW"
+fi
+if [ "$1 $2" = "pr create" ]; then
+  printf 'https://github.com/tibia-sh/mcp.tibia.sh/pull/11\\n'
 fi
 exit 0
 `,
@@ -665,12 +725,15 @@ exit 0
   });
 
   let runs = 0;
-  /** Runs the CLI with the given arguments, the fakes on PATH and nothing else in the environment but env. */
+  /**
+   * Runs the CLI with the given arguments, the fakes on PATH and nothing else in the environment but env, from
+   * the scratch directory, since the script must not depend on where it is run from.
+   */
   function cli(args: string[], env: Record<string, string> = {}, path = bin) {
     runs += 1;
     const log = join(scratch, `log-${runs}`);
     const result = spawnSync(process.execPath, [SCRIPT, ...args], {
-      cwd: REPO_ROOT,
+      cwd: scratch,
       env: { PATH: path, FAKE_LOG: log, ...env },
       encoding: 'utf8',
     });
@@ -723,11 +786,46 @@ exit 0
   });
 
   test('publish with nothing changed prints nothing-to-publish and exits 0, showing what git printed', () => {
-    const result = cli(['publish', MCP, '9.9.9'], { FAKE_DIFF_STATUS: '0' });
+    const cwdFile = join(scratch, 'cwd-seen');
+    const result = cli(['publish', MCP, '9.9.9'], { FAKE_DIFF_STATUS: '0', FAKE_CWD: cwdFile });
     assert.equal(result.status, 0);
     assert.equal(result.stdout, 'fake git: diff --quiet -- package.json pnpm-lock.yaml\nbump: nothing-to-publish\n');
     assert.equal(result.stderr, '');
     assert.equal(result.log(), 'git diff --quiet -- package.json pnpm-lock.yaml\n');
+    assert.equal(readFileSync(cwdFile, 'utf8'), `${resolve(REPO_ROOT)}\n`, 'git ran in the repo root, not the cwd');
+  });
+
+  test('publish of a change opens the pull request and prints merged with exit 0 once gh shows it merged', () => {
+    const cwdFile = join(scratch, 'cwd-seen-merged');
+    const branch = 'bump/tibiawiki-mcp-9.9.9';
+    const title = `chore(deps): bump ${MCP} to 9.9.9`;
+    const result = cli(['publish', MCP, '9.9.9'], {
+      FAKE_DIFF_STATUS: '1',
+      FAKE_VIEW: '{"autoMergeRequest":null,"state":"MERGED"}',
+      FAKE_CWD: cwdFile,
+    });
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, '');
+    const lines = result.stdout.split('\n');
+    assert.equal(lines[0], 'fake git: diff --quiet -- package.json pnpm-lock.yaml');
+    assert.equal(lines[1], 'https://github.com/tibia-sh/mcp.tibia.sh/pull/11');
+    assert.equal(lines[2], '{"autoMergeRequest":null,"state":"MERGED"}');
+    assert.equal(lines[3], 'bump: merged');
+    const logged = result.log().trimEnd().split('\n');
+    assert.deepEqual(logged.slice(0, 7), [
+      'git diff --quiet -- package.json pnpm-lock.yaml',
+      `gh pr list --head ${branch} --state open --json number --jq .[].number`,
+      `git switch -c ${branch}`,
+      'git add package.json pnpm-lock.yaml',
+      'git -c user.name=github-actions[bot] -c user.email=41898282+github-actions[bot]@users.noreply.github.com ' +
+        `commit -m ${title}`,
+      'gh auth setup-git',
+      `git push --force origin HEAD:refs/heads/${branch}`,
+    ]);
+    const create = `gh pr create --base main --head ${branch} --title ${title} --body-file `;
+    assert.match(logged[7] ?? '', new RegExp(`^${literal(create)}.+/body\\.md$`));
+    assert.deepEqual(logged.slice(8), [`gh pr view ${branch} --json state,autoMergeRequest`]);
+    assert.deepEqual(new Set(readFileSync(cwdFile, 'utf8').trimEnd().split('\n')), new Set([resolve(REPO_ROOT)]));
   });
 
   test('a command that fails ends the CLI with its stderr, after showing it, and gh got the token unread', () => {
