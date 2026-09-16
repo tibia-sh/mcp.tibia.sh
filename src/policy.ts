@@ -33,11 +33,14 @@ export type CorsHeaders = Readonly<Record<string, string>>;
  * Any origin is allowed, because the Worker keeps no state and no credentials, so a cross-site request can do
  * nothing a curl cannot, except spend the visitor's own rate-limit allowance. With the origin a wildcard there is
  * no per-origin echo and no Vary. The wildcard in Allow-Headers covers every header the SDK's browser client
- * sends. Retry-After is exposed so a browser client can read it on a 429 or 503.
+ * sends. Retry-After is exposed so a browser client can read it on a 429 or 503. GET is allowed because the SDK's
+ * client opens a standalone GET stream on the endpoint after initialized, with Mcp-Protocol-Version, so a browser
+ * preflights it. Allowed, the GET meets the 405, which the SDK reads as no stream and carries on. Refused, the
+ * browser reports a network error to the client.
  */
 export const ENDPOINT_CORS: CorsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': '*',
   'Access-Control-Expose-Headers': 'Retry-After',
   'Access-Control-Max-Age': '86400',

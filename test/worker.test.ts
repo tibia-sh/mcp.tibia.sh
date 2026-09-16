@@ -64,7 +64,7 @@ const OVERSIZED = new Uint8Array(65_537).fill(0x20);
 /** The whole CORS set of every endpoint answer but the landing page, with the names as Headers iterates them. */
 const ENDPOINT_CORS = {
   'access-control-allow-headers': '*',
-  'access-control-allow-methods': 'POST, OPTIONS',
+  'access-control-allow-methods': 'GET, POST, OPTIONS',
   'access-control-allow-origin': '*',
   'access-control-expose-headers': 'Retry-After',
   'access-control-max-age': '86400',
@@ -475,20 +475,29 @@ test('a non-HTML GET, DELETE and PUT on /wiki are 405 with Allow: GET, POST, OPT
   }
 });
 
-test('a preflight on /wiki is 204 with no body and the CORS headers', async () => {
-  // What a browser sends before the SDK client's first POST.
-  const response = await request('/wiki', {
-    method: 'OPTIONS',
-    headers: {
-      origin: 'https://example.com',
-      'access-control-request-method': 'POST',
-      'access-control-request-headers': 'content-type,mcp-protocol-version',
-    },
-  });
-  assert.deepEqual(
-    { status: response.status, cors: corsHeaders(response), body: await response.text() },
-    { status: 204, cors: ENDPOINT_CORS, body: '' },
-  );
+test('a preflight on /wiki is 204 with no body and the CORS headers, for a POST and for the GET stream', async () => {
+  // What a browser sends before the SDK client's first POST, and before the standalone GET stream the client
+  // opens after initialized. The answer does not depend on the requested method: the browser reads the allowed
+  // methods from it, and the GET then meets the 405, which the SDK reads as no stream.
+  const requested: [method: string, headers: string][] = [
+    ['POST', 'content-type,mcp-protocol-version'],
+    ['GET', 'mcp-protocol-version'],
+  ];
+  for (const [method, headers] of requested) {
+    const response = await request('/wiki', {
+      method: 'OPTIONS',
+      headers: {
+        origin: 'https://example.com',
+        'access-control-request-method': method,
+        'access-control-request-headers': headers,
+      },
+    });
+    assert.deepEqual(
+      { status: response.status, cors: corsHeaders(response), body: await response.text() },
+      { status: 204, cors: ENDPOINT_CORS, body: '' },
+      `a preflight for ${method}`,
+    );
+  }
 });
 
 test('the server card answers GET, HEAD and a matching If-None-Match with the card headers', async () => {
