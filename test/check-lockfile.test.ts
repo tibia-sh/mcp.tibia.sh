@@ -9,6 +9,7 @@
  * The real download and gh runner are covered at the end, against a loopback server and shell scripts named gh.
  */
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -191,13 +192,16 @@ function fakeRegistry(bodies: Record<string, unknown>) {
   return { fetchJson, requests, flight };
 }
 
-/** A fake download that writes the body bodies holds for a URL, and rejects every other URL or an Error body. */
-function fakeDownloads(bodies: Record<string, string | Error>) {
+/**
+ * A fake download that writes the body bodies holds for a URL, once a Promise body resolves, and rejects every other
+ * URL or an Error body.
+ */
+function fakeDownloads(bodies: Record<string, string | Error | Promise<string>>) {
   const calls: { url: string; file: string }[] = [];
   const download: Download = async (url, file) => {
     calls.push({ url, file });
     await setImmediate();
-    const body = bodies[url];
+    const body = await bodies[url];
     if (body === undefined) throw new Error(`the fake registry has no ${url}`);
     if (body instanceof Error) throw body;
     await writeFile(file, body);
@@ -589,14 +593,59 @@ describe('an @tibia.sh/ package needs one copy, at its pin, with provenance gh v
     });
   });
 
-  test('a gh that cannot run rejects the whole check', async () => {
+  test('a gh that cannot run rejects the whole check, once every lookup in flight has settled', async () => {
     const mcp = goodFirstParty(MCP, '0.6.0', MCP_WORKFLOW);
-    const registry = fakeRegistry(mcp.registry);
-    const downloads = fakeDownloads(mcp.downloads);
-    const gh = fakeGh({ [MCP_WORKFLOW]: new Error('gh cannot start: ENOENT') });
-    await assert.rejects(check({ [spec(MCP, '0.6.0')]: mcp.entry }, { registry, downloads, gh }), {
-      message: 'gh cannot start: ENOENT',
-    });
+    const data = goodFirstParty(DATA, '3.0.3', DATA_WORKFLOW);
+    const registry = fakeRegistry({ ...mcp.registry, ...data.registry });
+    // The data tarball arrives only when the test lets it, after gh has failed to start for the mcp one.
+    const dataTarball = Promise.withResolvers<string>();
+    const downloads = fakeDownloads({ ...mcp.downloads, [tarballUrl(DATA, '3.0.3')]: dataTarball.promise });
+    const gh = fakeGh({ [MCP_WORKFLOW]: new Error('gh cannot start: ENOENT'), [DATA_WORKFLOW]: undefined });
+    const events: string[] = [];
+    const download: Download = async (url, file) => {
+      const integrity = await downloads.download(url, file);
+      events.push(`downloaded ${url}`);
+      return integrity;
+    };
+    const verify: Verify = (input) => {
+      events.push(`verify ${input.workflow}`);
+      return gh.verify(input);
+    };
+    const packages = { [spec(MCP, '0.6.0')]: mcp.entry, [spec(DATA, '3.0.3')]: data.entry };
+    const pending = checkLockfile(lock(packages), { ...depsOf({ registry }), download, verify }, NOW).catch(
+      (error: unknown) => {
+        events.push('rejected');
+        throw error;
+      },
+    );
+    pending.catch(() => undefined);
+    while (!gh.calls.some((call) => call.workflow === MCP_WORKFLOW)) await setImmediate();
+    await setImmediate();
+    assert.deepEqual(events, [`downloaded ${tarballUrl(MCP, '0.6.0')}`, `verify ${MCP_WORKFLOW}`]);
+    dataTarball.resolve(`tarball of ${DATA}@3.0.3`);
+    await assert.rejects(pending, { message: 'gh cannot start: ENOENT' });
+    assert.deepEqual(events, [
+      `downloaded ${tarballUrl(MCP, '0.6.0')}`,
+      `verify ${MCP_WORKFLOW}`,
+      `downloaded ${tarballUrl(DATA, '3.0.3')}`,
+      `verify ${DATA_WORKFLOW}`,
+      'rejected',
+    ]);
+    assert.deepEqual(
+      gh.calls.map(({ workflow, tarballBody, bundleJson }) => ({ workflow, tarballBody, bundleJson })),
+      [
+        {
+          workflow: MCP_WORKFLOW,
+          tarballBody: `tarball of ${MCP}@0.6.0`,
+          bundleJson: provenanceAttestation(MCP, '0.6.0').bundle,
+        },
+        {
+          workflow: DATA_WORKFLOW,
+          tarballBody: `tarball of ${DATA}@3.0.3`,
+          bundleJson: provenanceAttestation(DATA, '3.0.3').bundle,
+        },
+      ],
+    );
   });
 });
 
@@ -713,8 +762,19 @@ describe('the real gh runner', () => {
     await assert.rejects(ghVerify(join(scratch, 'no-such-gh'))(input), { message: 'gh cannot start: ENOENT' });
   });
 
-  test('a gh that gives no verdict in time is stopped', async () => {
-    const sleeper = await scriptedGh('sleeper', 'exec sleep 30');
+  test('a gh that gives no verdict in time is killed, and is gone when the verdict resolves', async () => {
+    // The fake records its pid, ignores SIGTERM, and keeps that disposition through exec, so only a kill ends it.
+    // With no arguments it exits at once: macOS scans a new executable on its first run, which can take 200 ms,
+    // so the test runs it once before the timed run.
+    const pidFile = join(scratch, 'sleeper-pid');
+    const sleeper = await scriptedGh(
+      'sleeper',
+      `[ $# -eq 0 ] && exit 0\ntrap '' TERM\necho $$ > '${pidFile}'\nexec sleep 30`,
+    );
+    assert.equal(spawnSync(sleeper, { stdio: 'ignore' }).status, 0);
     assert.equal(await ghVerify(sleeper, 200)(input), 'no verdict from gh within 0.2 s');
+    const pid = Number((await readFile(pidFile, 'utf8')).trim());
+    assert.ok(pid > 0, 'the fake gh recorded its pid');
+    assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
   });
 });

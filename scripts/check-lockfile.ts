@@ -9,8 +9,10 @@
  *   installs a lockfile, so CI checks the lockfile itself.
  * - An @tibia.sh/ package skips that cooldown, so it passes only when first-party.ts registers its release
  *   workflow, the lockfile holds it at one version, the one package.json pins, its registry tarball has the
- *   integrity the lockfile records, and `gh attestation verify` accepts the registry's provenance attestation for
- *   that tarball as signed by that workflow on main, in a tibia-sh repository, on a GitHub-hosted runner.
+ *   integrity the lockfile records, the registry holds exactly one provenance attestation for it, and
+ *   `gh attestation verify` accepts that attestation for that tarball as signed by that workflow on main, in a
+ *   tibia-sh repository, on a GitHub-hosted runner. npm attaches one provenance attestation to a version, so a
+ *   second one is a change to fail closed on.
  * - An entry that is not a registry package of its own name and version fails, because neither rule can vouch for
  *   what pnpm would install from it.
  *
@@ -209,7 +211,11 @@ function errorText(error: unknown): string {
   return error.cause instanceof Error ? `${error.message}: ${error.cause.message}` : error.message;
 }
 
-/** Calls work on every item, at most `limit` calls at a time, and settles when all of them have. */
+/**
+ * Calls work on every item, at most `limit` calls at a time, and settles when all of them have. A rejection
+ * surfaces only once the other calls in flight have settled too, so nothing is still running when the caller
+ * acts on it.
+ */
 async function forEachLimited<T>(items: T[], limit: number, work: (item: T) => Promise<void>): Promise<void> {
   let next = 0;
   async function worker(): Promise<void> {
@@ -219,7 +225,8 @@ async function forEachLimited<T>(items: T[], limit: number, work: (item: T) => P
       await work(item);
     }
   }
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  const outcomes = await Promise.allSettled(Array.from({ length: Math.min(limit, items.length) }, worker));
+  for (const outcome of outcomes) if (outcome.status === 'rejected') throw outcome.reason;
 }
 
 /**
@@ -355,7 +362,8 @@ export async function download(url: string, file: string): Promise<string> {
  * sign the tarball's sha512, from workflow in an OWNER repository at SOURCE_REF on a GitHub-hosted runner, as a
  * PROVENANCE predicate. gh prints nothing on success and one Error line to stderr on failure, so a non-zero exit
  * resolves with the last non-empty line of stderr, or the exit code when there is none. A run longer than
- * timeoutMs is killed and resolves with that. It rejects when the command cannot start, as when gh is not on PATH.
+ * timeoutMs gets SIGKILL, which it cannot ignore, and resolves with that. Every verdict waits for the process to
+ * be gone and its stderr to end. It rejects when the command cannot start, as when gh is not on PATH.
  */
 export function ghVerify(command = 'gh', timeoutMs = GH_TIMEOUT_MS): Verify {
   return ({ tarball, bundle, workflow }) =>
@@ -373,17 +381,22 @@ export function ghVerify(command = 'gh', timeoutMs = GH_TIMEOUT_MS): Verify {
       const child = spawn(command, args, {
         stdio: ['ignore', 'ignore', 'pipe'],
         signal: AbortSignal.timeout(timeoutMs),
+        killSignal: 'SIGKILL',
       });
       let stderr = '';
+      let timedOut = false;
       child.stderr.setEncoding('utf8').on('data', (chunk: string) => {
         stderr += chunk;
       });
       child.on('error', (error: NodeJS.ErrnoException) => {
-        if (error.name === 'AbortError') resolve(`no verdict from gh within ${timeoutMs / 1000} s`);
+        // The abort has sent the kill. The verdict follows on close, once the process has exited.
+        if (error.name === 'AbortError') timedOut = true;
         else reject(new Error(`gh cannot start: ${error.code ?? error.message}`));
       });
       child.on('close', (code, signal) => {
-        if (code === 0) {
+        if (timedOut) {
+          resolve(`no verdict from gh within ${timeoutMs / 1000} s`);
+        } else if (code === 0) {
           resolve(undefined);
         } else if (code === null) {
           resolve(`gh was killed by ${signal}`);
