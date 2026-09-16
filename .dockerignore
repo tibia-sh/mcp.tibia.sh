@@ -1,4 +1,4 @@
 *
 !package.json
-!package-lock.json
-!.npmrc
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
