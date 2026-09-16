@@ -537,17 +537,20 @@ test('the server card answers GET, HEAD and a matching If-None-Match with the ca
     `HEAD: ${JSON.stringify(answer.raw)}`,
   );
 
+  // A 304 carries the tag, the caching headers and the CORS set, and no Content-Type, since it sends no document.
   const revalidation = await request('/wiki/server-card', {
     headers: { accept: SERVER_CARD_TYPE, 'if-none-match': etag },
   });
   assert.deepEqual(
     {
       status: revalidation.status,
+      contentType: revalidation.headers.get('content-type'),
+      cacheControl: revalidation.headers.get('cache-control'),
       etag: revalidation.headers.get('etag'),
       cors: corsHeaders(revalidation),
       body: await revalidation.text(),
     },
-    { status: 304, etag, cors: CARD_CORS, body: '' },
+    { status: 304, contentType: null, cacheControl: 'public, max-age=3600', etag, cors: CARD_CORS, body: '' },
     'GET with If-None-Match',
   );
 });
@@ -658,8 +661,9 @@ test('the rate limit is charged once per JSON-RPC message, and once per server c
   );
   const card = await summary(await request('/wiki/server-card', { headers: { accept: SERVER_CARD_TYPE } }));
   const next = await summary(await request('/wiki', { method: 'POST', headers: MCP_HEADERS, body: TOOLS_LIST }));
+  // With If-None-Match: *, which any current tag matches, a 429 proves the charge comes before the 304.
   const cardPastTheLimit = await summary(
-    await request('/wiki/server-card', { headers: { accept: SERVER_CARD_TYPE } }),
+    await request('/wiki/server-card', { headers: { accept: SERVER_CARD_TYPE, 'if-none-match': '*' } }),
   );
   const preflight = await summary(
     await request('/wiki', {
