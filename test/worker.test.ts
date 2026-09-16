@@ -1,11 +1,14 @@
 /**
  * The Worker end to end, in `wrangler dev` with local containers.
  *
- * - Everything the Worker answers itself leaves the container asleep: the landing page, 404, 405, 403, 413, 415
- *   and 400. The 403, 413 and 415 requests also break later rules, so they prove the order of the checks too. The
- *   test counts this session's dev containers when wrangler is ready and after those checks.
+ * - Everything the Worker answers itself leaves the container asleep: the landing page, 404, 405, the preflight,
+ *   413, 415 and 400. The 413 and 415 requests also break later rules, so they prove the order of the checks too.
+ *   The test counts this session's dev containers when wrangler is ready and after those checks.
+ * - Every answer of the endpoint carries the whole endpoint CORS set, the Worker's own and the container's alike,
+ *   and the landing page and a 404 carry none.
  * - MCP requests reach the container, which serves the pinned artifact. A chunked request reaches it as well,
- *   which proves that the forwarded request carries Content-Length (spec 12, item 4).
+ *   which proves that the forwarded request carries Content-Length (spec 12, item 4). A request with Origin
+ *   reaches it too, as a browser client's does.
  * - The rate limit is charged once per JSON-RPC message.
  *
  * wrangler runs without Cloudflare credentials, and keeps its local state in a directory of its own. Miniflare
@@ -57,6 +60,14 @@ const MCP_HEADERS = { 'content-type': 'application/json', accept: 'application/j
 const TOOLS_LIST = '{"jsonrpc":"2.0","id":1,"method":"tools/list"}';
 /** One byte over the Worker's body cap, and never more (see the 413 test). */
 const OVERSIZED = new Uint8Array(65_537).fill(0x20);
+/** The whole CORS set of every endpoint answer but the landing page, with the names as Headers iterates them. */
+const ENDPOINT_CORS = {
+  'access-control-allow-headers': '*',
+  'access-control-allow-methods': 'POST, OPTIONS',
+  'access-control-allow-origin': '*',
+  'access-control-expose-headers': 'Retry-After',
+  'access-control-max-age': '86400',
+};
 
 let wrangler: ChildProcessByStdio<null, Readable, Readable> | undefined;
 let spawnError: Error | undefined;
@@ -259,9 +270,14 @@ function request(path: string, init: RequestInit = {}): Promise<Response> {
   return fetch(new URL(path, devServer()), { ...init, signal: AbortSignal.timeout(REQUEST_MS) });
 }
 
+/** Every Access-Control-* header of an answer, by name, so a comparison sees a missing and a surplus header alike. */
+function corsHeaders(response: Response): Record<string, string> {
+  return Object.fromEntries([...response.headers].filter(([name]) => name.startsWith('access-control-')));
+}
+
 /**
- * What the tests compare about an answer: its status, whether it is text/plain, Allow, Retry-After and the body.
- * The Worker's own bodies are short, so a longer body is cut to keep a failure readable.
+ * What the tests compare about an answer: its status, whether it is text/plain, Allow, Retry-After, its CORS
+ * headers and the body. The Worker's own bodies are short, so a longer body is cut to keep a failure readable.
  */
 async function summary(response: Response) {
   const body = await response.text();
@@ -270,13 +286,25 @@ async function summary(response: Response) {
     textPlain: /^text\/plain(;|$)/.test(response.headers.get('content-type') ?? ''),
     allow: response.headers.get('allow'),
     retryAfter: response.headers.get('retry-after'),
+    cors: corsHeaders(response),
     body: body.length > 200 ? `${body.slice(0, 200)}... (${body.length} characters)` : body,
   };
 }
 
-/** The summary of an answer the Worker gives by itself. */
-function workerAnswer(status: number, body: string, headers: { allow?: string; retryAfter?: string } = {}) {
-  return { status, textPlain: true, allow: headers.allow ?? null, retryAfter: headers.retryAfter ?? null, body };
+/** The summary of an answer the Worker gives by itself, with no CORS headers unless the test names a set. */
+function workerAnswer(
+  status: number,
+  body: string,
+  headers: { allow?: string; retryAfter?: string; cors?: Record<string, string> } = {},
+) {
+  return {
+    status,
+    textPlain: true,
+    allow: headers.allow ?? null,
+    retryAfter: headers.retryAfter ?? null,
+    cors: headers.cors ?? {},
+    body,
+  };
 }
 
 /**
@@ -369,9 +397,10 @@ test('the landing page answers GET on / and /wiki, and HEAD on /, with the deplo
         status: response.status,
         contentType: response.headers.get('content-type'),
         commit: response.headers.get('x-deploy-commit'),
+        cors: corsHeaders(response),
         namesTheUrl: body.includes('https://mcp.tibia.sh/wiki'),
       },
-      { status: 200, contentType: 'text/html; charset=utf-8', commit: 'local', namesTheUrl: true },
+      { status: 200, contentType: 'text/html; charset=utf-8', commit: 'local', cors: {}, namesTheUrl: true },
       `GET ${path}`,
     );
   }
@@ -415,46 +444,52 @@ test('unknown paths and POST / are 404', async () => {
   }
 });
 
-test('GET without an HTML Accept, DELETE and PUT on /wiki are 405 with Allow: GET, POST', async () => {
+test('a non-HTML GET, DELETE and PUT on /wiki are 405 with Allow: GET, POST, OPTIONS and CORS headers', async () => {
   // fetch sends Accept: */* when none is set.
   for (const method of ['GET', 'DELETE', 'PUT']) {
     assert.deepEqual(
       await summary(await request('/wiki', { method })),
-      workerAnswer(405, 'Method Not Allowed', { allow: 'GET, POST' }),
+      workerAnswer(405, 'Method Not Allowed', { allow: 'GET, POST, OPTIONS', cors: ENDPOINT_CORS }),
       method,
     );
   }
 });
 
-test('a POST with Origin is 403, even when it also breaks the size and content type rules', async () => {
-  const browser = { origin: 'https://example.com' };
-  const valid = await request('/wiki', { method: 'POST', headers: { ...MCP_HEADERS, ...browser }, body: TOOLS_LIST });
-  assert.deepEqual(await summary(valid), workerAnswer(403, 'Forbidden'), 'a tools/list with Origin');
-  const invalid = await request('/wiki', {
-    method: 'POST',
-    headers: { ...browser, 'content-type': 'text/plain' },
-    body: OVERSIZED,
+test('a preflight on /wiki is 204 with no body and the CORS headers', async () => {
+  // What a browser sends before the SDK client's first POST.
+  const response = await request('/wiki', {
+    method: 'OPTIONS',
+    headers: {
+      origin: 'https://example.com',
+      'access-control-request-method': 'POST',
+      'access-control-request-headers': 'content-type,mcp-protocol-version',
+    },
   });
-  assert.deepEqual(await summary(invalid), workerAnswer(403, 'Forbidden'), 'an oversized text/plain body with Origin');
+  assert.deepEqual(
+    { status: response.status, cors: corsHeaders(response), body: await response.text() },
+    { status: 204, cors: ENDPOINT_CORS, body: '' },
+  );
 });
 
 test('a body over 65,536 bytes is 413, declared or chunked, even with the wrong content type', async () => {
   // Exactly one byte over. In wrangler dev, a 413 answered without draining a larger chunked upload breaks the
   // next pooled request with 500 Network connection lost, which is an artifact of the dev proxy.
   const textPlain = { 'content-type': 'text/plain' };
+  const tooLarge = workerAnswer(413, 'Payload Too Large', { cors: ENDPOINT_CORS });
   const declared = await request('/wiki', { method: 'POST', headers: textPlain, body: OVERSIZED });
-  assert.deepEqual(await summary(declared), workerAnswer(413, 'Payload Too Large'), 'Content-Length: 65537');
+  assert.deepEqual(await summary(declared), tooLarge, 'Content-Length: 65537');
   const streamed = await postChunked('/wiki', textPlain, OVERSIZED, 16_384);
-  assert.deepEqual(await summary(streamed), workerAnswer(413, 'Payload Too Large'), 'a chunked 65,537-byte body');
+  assert.deepEqual(await summary(streamed), tooLarge, 'a chunked 65,537-byte body');
 });
 
 test('a content type other than application/json is 415, and a body that is not JSON-RPC is 400', async () => {
   const textPlain = { 'content-type': 'text/plain' };
   const wrongType = await request('/wiki', { method: 'POST', headers: textPlain, body: 'not json' });
-  assert.deepEqual(await summary(wrongType), workerAnswer(415, 'Unsupported Media Type'), 'text/plain');
+  const unsupported = workerAnswer(415, 'Unsupported Media Type', { cors: ENDPOINT_CORS });
+  assert.deepEqual(await summary(wrongType), unsupported, 'text/plain');
   for (const body of ['not json', '{"jsonrpc":"1.0"}']) {
     const response = await request('/wiki', { method: 'POST', headers: { 'content-type': 'application/json' }, body });
-    assert.deepEqual(await summary(response), workerAnswer(400, 'Bad Request'), body);
+    assert.deepEqual(await summary(response), workerAnswer(400, 'Bad Request', { cors: ENDPOINT_CORS }), body);
   }
 });
 
@@ -491,6 +526,21 @@ test('MCP requests reach the container, which serves the pinned artifact', async
   assert.notDeepEqual(sessionContainers(), [], 'docker ps shows no dev container of this session');
 });
 
+test('an MCP request with Origin reaches the container, and its answer carries the CORS headers', async () => {
+  // The SDK's browser client sends Origin on every request. The container's answer has no CORS headers of its
+  // own, so the ones a browser reads are the Worker's, set on the answer it passes on.
+  const response = await request('/wiki', {
+    method: 'POST',
+    headers: { ...MCP_HEADERS, origin: 'https://example.com' },
+    body: TOOLS_LIST,
+  });
+  const body = await response.text();
+  assert.equal(response.status, 200, `a tools/list with Origin: ${body.slice(0, 200)}`);
+  assert.deepEqual(corsHeaders(response), ENDPOINT_CORS, 'the CORS headers of a tools/list with Origin');
+  const tools = toolsIn(body);
+  assert.ok(Array.isArray(tools) && tools.length > 0, `no tools in ${body.slice(0, 200)}`);
+});
+
 test('the rate limit is charged once per JSON-RPC message', async () => {
   // Miniflare's rate limiter counts exactly, in fixed windows aligned to the wall-clock minute. Starting just after
   // a boundary gives the two requests below a whole window.
@@ -507,5 +557,9 @@ test('the rate limit is charged once per JSON-RPC message', async () => {
     `the two POSTs ended ${seconds} s into their rate-limit window, too close to the next window to show anything`,
   );
   assert.notEqual(batch.status, 429, `a batch of 300 messages, the whole limit: ${JSON.stringify(batch)}`);
-  assert.deepEqual(next, workerAnswer(429, 'Too Many Requests', { retryAfter: '60' }), 'message 301');
+  assert.deepEqual(
+    next,
+    workerAnswer(429, 'Too Many Requests', { retryAfter: '60', cors: ENDPOINT_CORS }),
+    'message 301',
+  );
 });

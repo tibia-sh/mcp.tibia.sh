@@ -1,6 +1,6 @@
 /**
- * The Worker's request policy: what it answers itself, what reaches the container, how the rate limit is
- * keyed and charged, and how a failed container fetch is retried.
+ * The Worker's request policy: what it answers itself, what reaches the container, which CORS headers each
+ * resource's answers carry, how the rate limit is keyed and charged, and how a failed container fetch is retried.
  *
  * The Worker applies it in this order: route, checkHeaders, readCapped, checkContentType, checkJsonRpcShape,
  * then rateLimitKey and chargeRateLimit, then forwardWithRetry. The first check that rejects a request decides
@@ -22,16 +22,45 @@ export const RATE_LIMITED_RETRY_AFTER = '60';
 /** The Retry-After of the 503 that follows a failed retry, in seconds. */
 export const UNAVAILABLE_RETRY_AFTER = '5';
 
-/** Where route sends a request: the landing page, the MCP endpoint, or an answer of 404 or 405. */
-export type Route = { kind: 'landing' } | { kind: 'mcp' } | { kind: 'reject'; status: 404 | 405; allow?: 'GET, POST' };
+/** A whole CORS header set, which the Worker sets on every answer of one resource. */
+export type CorsHeaders = Readonly<Record<string, string>>;
+
+/**
+ * The CORS headers of the MCP endpoint, on every answer of /wiki and /wiki/ but the landing page: the container's
+ * responses, the Worker's own rejections and 503, the 405 and the preflight.
+ *
+ * Any origin is allowed, because the Worker keeps no state and no credentials, so a cross-site request can do
+ * nothing a curl cannot, except spend the visitor's own rate-limit allowance. With the origin a wildcard there is
+ * no per-origin echo and no Vary. The wildcard in Allow-Headers covers every header the SDK's browser client
+ * sends. Retry-After is exposed so a browser client can read it on a 429 or 503.
+ */
+export const ENDPOINT_CORS: CorsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': '*',
+  'Access-Control-Expose-Headers': 'Retry-After',
+  'Access-Control-Max-Age': '86400',
+};
+
+/** What a 405 names in Allow: the methods its resource answers. */
+export type Allow = 'GET, POST, OPTIONS' | 'GET, OPTIONS';
+
+/**
+ * Where route sends a request: the landing page, the MCP endpoint, a CORS preflight, or an answer of 404 or
+ * 405. A preflight and a 405 carry the CORS headers of their resource.
+ */
+export type Route =
+  | { kind: 'landing' }
+  | { kind: 'mcp' }
+  | { kind: 'preflight'; cors: CorsHeaders }
+  | { kind: 'reject'; status: 404 }
+  | { kind: 'reject'; status: 405; allow: Allow; cors: CorsHeaders };
 
 /** A request the Worker answers itself, with a short text/plain body. */
-export type Rejection = { status: 400 | 403 | 413 | 415; body: string };
+export type Rejection = { status: 400 | 413 | 415; body: string };
 
 /** How many JSON-RPC messages a body of the accepted shape holds, or its rejection. */
 export type Shape = { ok: true; messages: number } | { ok: false; rejection: Rejection };
-
-const FORBIDDEN: Rejection = { status: 403, body: 'Forbidden' };
 
 /** The answer to a body over MAX_BODY_BYTES, whether its declared length or its stream is over. */
 export const PAYLOAD_TOO_LARGE: Rejection = { status: 413, body: 'Payload Too Large' };
@@ -45,8 +74,10 @@ const BAD_REQUEST: Rejection = { status: 400, body: 'Bad Request' };
  *
  * - POST on /wiki or /wiki/ is the MCP endpoint, served without a redirect, because redirecting a POST breaks
  *   clients.
+ * - OPTIONS on /wiki or /wiki/ is a CORS preflight, which the Worker answers with the endpoint's CORS headers.
+ *   A browser sends one before its first MCP request.
  * - GET or HEAD on /, /wiki or /wiki/ with an Accept containing text/html is the landing page.
- * - Any other method on /wiki or /wiki/, a non-HTML GET included, is 405.
+ * - Any other method on /wiki or /wiki/, a non-HTML GET included, is 405 with the endpoint's CORS headers.
  * - Every other path is 404. That includes the OAuth discovery paths, so connector clients read the server as
  *   needing no auth.
  *
@@ -55,22 +86,22 @@ const BAD_REQUEST: Rejection = { status: 400, body: 'Bad Request' };
 export function route(method: string, pathname: string, accept: string | null): Route {
   const wiki = pathname === '/wiki' || pathname === '/wiki/';
   if (wiki && method === 'POST') return { kind: 'mcp' };
+  if (wiki && method === 'OPTIONS') return { kind: 'preflight', cors: ENDPOINT_CORS };
   if ((wiki || pathname === '/') && (method === 'GET' || method === 'HEAD') && accept?.includes('text/html')) {
     return { kind: 'landing' };
   }
-  return wiki ? { kind: 'reject', status: 405, allow: 'GET, POST' } : { kind: 'reject', status: 404 };
+  return wiki
+    ? { kind: 'reject', status: 405, allow: 'GET, POST, OPTIONS', cors: ENDPOINT_CORS }
+    : { kind: 'reject', status: 404 };
 }
 
 /**
  * The checks that need only the headers.
  *
- * - Any Origin header, even an empty one, is 403. Browser clients are not supported, and the MCP clients
- *   served here send none.
  * - A declared Content-Length above MAX_BODY_BYTES is 413. A missing length reads as 0 and one that does not
  *   parse as NaN, and neither is above the cap, so readCapped decides.
  */
 export function checkHeaders(headers: Headers): Rejection | null {
-  if (headers.has('origin')) return FORBIDDEN;
   if (Number(headers.get('content-length')) > MAX_BODY_BYTES) return PAYLOAD_TOO_LARGE;
   return null;
 }

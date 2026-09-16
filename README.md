@@ -17,6 +17,14 @@ batch counts. Past the limit, it answers `429` with `Retry-After: 60`.
 The limit is approximate. Cloudflare counts it per location and applies it permissively. claude.ai users share
 Anthropic's egress IPs, so they share one allowance.
 
+## Browser clients
+
+The endpoint answers CORS preflights and allows any origin, so an MCP client that runs in a browser needs no
+configuration from you. Every answer of `/wiki` but the landing page carries the CORS headers, and a browser
+client can read `Retry-After` on a `429`. A web page can make its visitors' browsers call the endpoint and spend
+each visitor's own per-IP allowance, which costs those visitors a `429` for up to a minute and reaches no state or
+non-public data.
+
 ## Privacy
 
 - Cloudflare processes every request. Your IP address is used for rate limiting.
