@@ -41,8 +41,9 @@ Cloudflare attaches the request URL to the Worker's log events, with your query 
      `pnpm add --save-exact`, then `scripts/check-lockfile.ts` on the result.
    - `node scripts/bump.ts publish` is the one step with the token. Unchanged files end it with
      `bump: nothing-to-publish`, and the run is green. Otherwise it pushes the branch `bump/<name>-<version>` and
-     opens the pull request `chore(deps): bump <package> to <version>`, or reuses the open one, turns auto-merge on
-     and waits up to 30 minutes for the merge.
+     opens the pull request `chore(deps): bump <package> to <version>`, or reuses the open one. Then it turns
+     auto-merge on, which merges at once when the checks have already passed, and waits up to 30 minutes for the
+     merge.
 3. CI runs the required checks `unit`, `container` and `worker` on the pull request. No job reads a secret, so
    every pull request runs every check. `container` builds the image and checks that it serves the pinned server
    version and index.
@@ -69,7 +70,8 @@ What can go wrong, and what to do:
 | What you see | What to do |
 |---|---|
 | Red CI on the bump pull request | The `bump` run turns red after 30 minutes, when its wait for the merge runs out, so act on the red checks without waiting for it. Push the fix to the bump branch, and auto-merge merges it once the checks pass. Or close the pull request, fix the cause on `main`, and run `bump.yml` by hand. |
-| A bump pull request closed, or open past 30 minutes | The `bump` run is red. Fix the cause, then run `bump.yml` by hand. It reuses an open pull request and turns auto-merge on again, or opens a new one. |
+| A bump pull request closed, or open past 30 minutes | The `bump` run is red. Fix the cause, then run `bump.yml` by hand. It reuses an open pull request and turns auto-merge on again, or opens a new one. A pull request that merges on its own after the run turned red needs nothing more: a run by hand then finds the version pinned, and its `pin` step ends with `bump: already-pinned`. |
+| A red `bump` run before any pull request exists | Read the last line of the failed step. In `pin`, npm did not serve the version with its provenance within 10 minutes, or the lockfile check refused the version: its provenance does not verify, or the lockfile holds a second copy of a first-party package at a version `package.json` does not pin. Wait, or fix the cause, then run `bump.yml` by hand. In `publish`, gh failed before it opened the pull request, and the line quotes what gh said. `Bad credentials` means the token was revoked, and [The release trigger token](#the-release-trigger-token) describes how to rotate it. |
 | A version still under a cooldown | The first-party packages skip the 7-day cooldown, and only their dependencies wait for it. The `pin` step fails at `pnpm add` when no version of some dependency is both in the range the release asks for and 7 days old, so the run is red before a pull request exists. Wait until one is, then run `bump.yml` by hand. |
 | A red `hosting` job in a release run | npm and the MCP registry are unaffected. The dispatch may still have arrived, so look for a `bump` run for that version in this repository's Actions tab, and run `bump.yml` by hand if there is none. A second run is harmless. It finds the version pinned, or the pull request open. |
 
@@ -183,10 +185,8 @@ The token holds these permissions on `mcp.tibia.sh`:
 | Pull requests | Read and write |
 | Metadata | Read, which GitHub adds to every fine-grained token |
 
-You pick the token's lifetime when you create it. The organization's token policy caps a fine-grained token at 366
-days by default, so the token expires within 366 days of its creation unless you raised that cap first and chose no
-expiry. The token's own page on GitHub shows its date. Once it expires, the `hosting` jobs and the `publish` step
-fail until you rotate it, so rotate before that date.
+The token has no expiry, so it lasts until it is rotated or revoked. The organization's token policy caps a
+fine-grained token at 366 days by default, and it was set to allow no expiry before the token was created.
 
 The token means control of what the endpoint serves. The ruleset merges any pull request whose required checks
 pass, and those checks run the pull request's own scripts and tests, so a holder can push a branch whose checks
@@ -197,10 +197,16 @@ own identity, so no rule can tell its pull requests from yours. It cannot push t
 through the API, or touch the other two repositories, and without the Workflows permission it cannot change a
 workflow file. The maintainer accepted that trade-off.
 
-If this token leaks, revoke it first. Then check what `main` holds and what the endpoint serves, with the `curl` in
-[Deploy](#deploy), and revert anything you did not land yourself in a revert pull request, whose merge deploys. Only
-then rotate the Cloudflare token as [The deploy token](#the-deploy-token) describes, since that rotation deploys
-`main` again, and the new token would otherwise run next to whatever the holder landed.
+If this token leaks, revoke it first. Then close every open pull request you cannot vouch for, since one with
+auto-merge on merges without the token once its checks pass, and cancel any run of `deploy.yml` still queued or in
+progress, since its `deploy` job reads the Cloudflare token when it starts. Then rotate the Cloudflare token, as
+[The deploy token](#the-deploy-token) describes but without its deploy: create the new token, store it and revoke
+the old one. A deploy the holder landed may have read the old token, and while that token is valid its holder can
+deploy or delete at Cloudflare outside GitHub, so the rotation goes before the revert, which waits on checks, a
+merge and a deploy. Then check what `main` holds and, with the `curl` in [Deploy](#deploy), what the endpoint
+serves, and revert anything you did not land yourself in a revert pull request. Its merge deploys clean code with
+the new token. Do not deploy before that, since a deploy would run the new token next to whatever the holder
+landed. Last, run the `curl` again to confirm that the endpoint serves the revert.
 
 To rotate it:
 
