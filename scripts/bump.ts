@@ -261,13 +261,30 @@ function unexpected(command: string[], stdout: string): Error {
   return new Error(`${command.join(' ')} printed ${JSON.stringify(stdout)}, which is not what it answers with`);
 }
 
-/** Whether an open pull request from branch exists, by gh, whose answer is the numbers of the open ones. */
+/**
+ * Whether this repository has an open pull request from branch, by gh, whose answer lists the open pull requests
+ * whose head is named branch, newest first and 30 at most, with the number of each and whether it comes from
+ * another repository. Anyone can open a pull request from a fork's branch of that name, and gh lists it here, but
+ * `gh pr view` and `gh pr merge` name a fork's head as owner:branch and would not find it, so only a pull request
+ * from this repository counts. More fork pull requests than gh lists would hide this repository's, and the run
+ * then fails at creating a second one. It throws when gh answers with another shape.
+ */
 async function hasOpenPullRequest(run: Run, branch: string): Promise<boolean> {
-  const command = ['pr', 'list', '--head', branch, '--state', 'open', '--json', 'number', '--jq', '.[].number'];
+  const command = ['pr', 'list', '--head', branch, '--state', 'open', '--json', 'number,isCrossRepository'];
   const { stdout } = await succeed(run, 'gh', command);
-  const numbers = stdout.trim() === '' ? [] : stdout.trim().split('\n');
-  if (!numbers.every((number) => /^\d+$/.test(number))) throw unexpected(['gh', ...command], stdout);
-  return numbers.length > 0;
+  let list: unknown;
+  try {
+    list = JSON.parse(stdout);
+  } catch {
+    list = undefined;
+  }
+  if (!Array.isArray(list)) throw unexpected(['gh', ...command], stdout);
+  const entries: unknown[] = list;
+  const wellFormed = entries.every(
+    (entry) => Number.isInteger(field(entry, 'number')) && typeof field(entry, 'isCrossRepository') === 'boolean',
+  );
+  if (!wellFormed) throw unexpected(['gh', ...command], stdout);
+  return entries.some((entry) => field(entry, 'isCrossRepository') === false);
 }
 
 /** The pull request from branch as gh sees it. It throws when gh answers with another shape. */
@@ -329,11 +346,12 @@ async function openPullRequest(run: Run, request: Request): Promise<void> {
 /**
  * Gets the pinned package.json and pnpm-lock.yaml merged. Unchanged files resolve nothing-to-publish. Otherwise an
  * open pull request from the request's branch is reused, or one is opened, and it is read: merged already resolves
- * merged, closed throws, and auto-merge is turned on when it is off. Then the wait begins: every MERGE_POLL_MS the
- * pull request is read again. Merged resolves merged. Closed throws. Auto-merge found off is turned on once more,
- * and throws the second time. No poll starts later than MERGE_DEADLINE_MS after the wait began: once the next one
- * would, it throws naming the pull request. Every git and gh command has COMMAND_TIMEOUT_MS to answer, and a
- * command that does not exit 0 throws with its stderr.
+ * merged, closed throws, and auto-merge is turned on when it is off. Turning it on merges the pull request at once
+ * when its checks have already passed, and the ruleset gates that merge like any other. Then the wait begins: every
+ * MERGE_POLL_MS the pull request is read again. Merged resolves merged. Closed throws. Auto-merge found off is
+ * turned on once more, and throws the second time. No poll starts later than MERGE_DEADLINE_MS after the wait
+ * began: once the next one would, it throws naming the pull request. Every git and gh command has
+ * COMMAND_TIMEOUT_MS to answer, and a command that does not exit 0 throws with its stderr.
  */
 export async function publish(
   request: Request,
