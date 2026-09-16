@@ -18,8 +18,10 @@
  * github-actions[bot], force-pushes the branch and opens the pull request. It turns auto-merge on when it is off,
  * then reads the pull request's state every 30 seconds for 30 minutes: merged ends it with `bump: merged`, closed
  * fails it, auto-merge found off is turned on once more and fails it the second time, and the deadline fails it,
- * so a stalled pull request is a red run. It runs gh and git as found on PATH, with the environment as it is: the
- * workflow puts the token in GH_TOKEN for this command only, and nothing here reads it.
+ * so a stalled pull request is a red run. It runs gh and git as found on PATH, in the repository root, with the
+ * environment as it is: the workflow puts the token in GH_TOKEN for this command only, and nothing here reads it.
+ * Each git and gh command has 120 seconds to answer. pnpm and the lockfile check have no bound of their own, since
+ * a cold store or a slow registry can take them minutes, and the workflow's own timeout bounds the run.
  *
  * Every outcome prints one `bump: <outcome>` line on stdout and exits 0. Any failure prints `bump: <reason>` on
  * stderr and exits 1. The commands' own output is shown as they run.
@@ -30,10 +32,22 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 import { FIRST_PARTY, FIRST_PARTY_SCOPE } from './first-party.ts';
+import {
+  attestationsUrl,
+  errorText,
+  fetchJson,
+  field,
+  isMapping,
+  packumentUrl,
+  provenanceAttestations,
+  PROVENANCE,
+} from './registry.ts';
+import type { FetchJson } from './registry.ts';
 
-const REGISTRY = 'https://registry.npmjs.org/';
-const PROVENANCE = 'https://slsa.dev/provenance/v1';
+/** The repository root, which every command runs in, wherever the script was started from. */
+const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 
 /** An exact version, as npm names a release and package.json pins it. */
 const VERSION = /^[0-9]+\.[0-9]+\.[0-9]+$/;
@@ -43,6 +57,8 @@ const NPM_POLL_MS = 15_000;
 const NPM_DEADLINE_MS = 10 * 60_000;
 /** How long one registry request may take. */
 const FETCH_TIMEOUT_MS = 10_000;
+/** How long one git or gh command may take. */
+const COMMAND_TIMEOUT_MS = 120_000;
 /** How often the pull request is read while waiting for the merge, and for how long since the wait began. */
 const MERGE_POLL_MS = 30_000;
 const MERGE_DEADLINE_MS = 30 * 60_000;
@@ -54,22 +70,13 @@ export type Request = { name: string; version: string; branch: string; title: st
 
 /** What a command printed, and its exit status, null when a signal ended it. */
 export type Outcome = { status: number | null; stdout: string; stderr: string };
-/** Runs a command with its arguments, without a shell, and resolves once it has ended. */
-export type Run = (command: string, args: string[]) => Promise<Outcome>;
-export type FetchJson = (url: string) => Promise<unknown>;
+/**
+ * Runs a command with its arguments, without a shell, and resolves once it has ended. With timeoutMs, a command
+ * that has not ended by then is killed, and the run rejects.
+ */
+export type Run = (command: string, args: string[], timeoutMs?: number) => Promise<Outcome>;
 /** The time and the pauses of a wait, which the tests fake. */
 export type Clock = { sleep: (ms: number) => Promise<void>; now: () => number };
-
-/** The value of an own property of value, or undefined when value is not an object or has no such property. */
-function field(value: unknown, key: string): unknown {
-  return typeof value === 'object' && value !== null && Object.hasOwn(value, key)
-    ? (value as Record<string, unknown>)[key]
-    : undefined;
-}
-
-function isMapping(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 /**
  * The request for pkg at version. It throws with the reason when pkg is not a package FIRST_PARTY registers, or
@@ -137,12 +144,6 @@ async function pauseBefore(deadline: number, interval: number, clock: Clock): Pr
   return clock.now() <= deadline;
 }
 
-/** An error's message, followed by its cause's, which is where fetch keeps the network error. */
-function errorText(error: unknown): string {
-  if (!(error instanceof Error)) return String(error);
-  return error.cause instanceof Error ? `${error.message}: ${error.cause.message}` : error.message;
-}
-
 /** Why a packument does not list version with a publish time, or undefined when it does. */
 function packumentLacks(packument: unknown, version: string): string | undefined {
   if (field(field(packument, 'versions'), version) === undefined) return `the packument lists no ${version}`;
@@ -152,11 +153,9 @@ function packumentLacks(packument: unknown, version: string): string | undefined
   return undefined;
 }
 
-/** Why an attestations response holds no provenance attestation, or undefined when it does. */
+/** Why an attestations response holds no provenance attestation, or undefined when it holds at least one. */
 function attestationsLack(response: unknown): string | undefined {
-  const attestations = field(response, 'attestations');
-  const held = Array.isArray(attestations) && attestations.some((one) => field(one, 'predicateType') === PROVENANCE);
-  return held ? undefined : `the registry holds no ${PROVENANCE} attestation`;
+  return provenanceAttestations(response).length > 0 ? undefined : `the registry holds no ${PROVENANCE} attestation`;
 }
 
 /**
@@ -181,22 +180,20 @@ async function lacks(
  * Resolves once npm serves the request's version: its packument lists the version with a publish time, and its
  * attestations document holds a provenance attestation. It tries every NPM_POLL_MS, the packument until that is
  * there and the attestations from then on, and no try starts later than NPM_DEADLINE_MS after the first: once the
- * next one would, it rejects naming what npm still lacks. Both URLs escape the scope's slash as the registry's own
- * clients do.
+ * next one would, it rejects naming what npm still lacks.
  */
 export async function waitForNpm(request: Request, deps: { fetchJson: FetchJson } & Clock): Promise<void> {
-  const path = request.name.replace('/', '%2F');
-  const packumentUrl = `${REGISTRY}${path}`;
-  const attestationsUrl = `${REGISTRY}-/npm/v1/attestations/${path}@${request.version}`;
+  const packument = packumentUrl(request.name);
+  const attestations = attestationsUrl(request.name, request.version);
   const deadline = deps.now() + NPM_DEADLINE_MS;
   let published = false;
   for (;;) {
     let reason: string | undefined;
     if (!published) {
-      reason = await lacks(deps.fetchJson, packumentUrl, (body) => packumentLacks(body, request.version));
+      reason = await lacks(deps.fetchJson, packument, (body) => packumentLacks(body, request.version));
       published = reason === undefined;
     }
-    if (published) reason = await lacks(deps.fetchJson, attestationsUrl, attestationsLack);
+    if (published) reason = await lacks(deps.fetchJson, attestations, attestationsLack);
     if (reason === undefined) return;
     if (!(await pauseBefore(deadline, NPM_POLL_MS, deps))) {
       throw new Error(
@@ -219,6 +216,11 @@ async function succeed(run: Run, command: string, args: string[]): Promise<Outco
   const outcome = await run(command, args);
   if (outcome.status !== 0) throw failure(command, args, outcome);
   return outcome;
+}
+
+/** The Run with every command bounded at timeoutMs. */
+function bounded(run: Run, timeoutMs: number): Run {
+  return (command, args) => run(command, args, timeoutMs);
 }
 
 /**
@@ -247,6 +249,12 @@ export async function pin(
 
 /** The state of a pull request as gh names it, and whether auto-merge is on. */
 type PullRequest = { state: 'OPEN' | 'CLOSED' | 'MERGED'; autoMerge: boolean };
+
+/** Whether the pull request from branch has merged, which ends the wait. A closed one, which never will, throws. */
+function hasMerged(pullRequest: PullRequest, branch: string): boolean {
+  if (pullRequest.state === 'CLOSED') throw new Error(`the pull request from ${branch} was closed without merging`);
+  return pullRequest.state === 'MERGED';
+}
 
 /** What gh printed, quoted, for an answer of another shape than the command's. */
 function unexpected(command: string[], stdout: string): Error {
@@ -320,37 +328,38 @@ async function openPullRequest(run: Run, request: Request): Promise<void> {
 
 /**
  * Gets the pinned package.json and pnpm-lock.yaml merged. Unchanged files resolve nothing-to-publish. Otherwise an
- * open pull request from the request's branch is reused, or one is opened, auto-merge is turned on when it is off,
- * and the wait begins: every MERGE_POLL_MS the pull request is read again. Merged resolves merged. Closed throws.
- * Auto-merge found off is turned on once more, and throws the second time. No poll starts later than
- * MERGE_DEADLINE_MS after the wait began: once the next one would, it throws naming the pull request. A command
- * that does not exit 0 throws with its stderr.
+ * open pull request from the request's branch is reused, or one is opened, and it is read: merged already resolves
+ * merged, closed throws, and auto-merge is turned on when it is off. Then the wait begins: every MERGE_POLL_MS the
+ * pull request is read again. Merged resolves merged. Closed throws. Auto-merge found off is turned on once more,
+ * and throws the second time. No poll starts later than MERGE_DEADLINE_MS after the wait began: once the next one
+ * would, it throws naming the pull request. Every git and gh command has COMMAND_TIMEOUT_MS to answer, and a
+ * command that does not exit 0 throws with its stderr.
  */
 export async function publish(
   request: Request,
   deps: { run: Run } & Clock,
 ): Promise<'merged' | 'nothing-to-publish'> {
   const { branch } = request;
+  const run = bounded(deps.run, COMMAND_TIMEOUT_MS);
   const diffArgs = ['diff', '--quiet', '--', 'package.json', 'pnpm-lock.yaml'];
-  const diff = await deps.run('git', diffArgs);
+  const diff = await run('git', diffArgs);
   if (diff.status === 0) return 'nothing-to-publish';
   // git diff --quiet exits 1 for a difference, and any other end is git failing.
   if (diff.status !== 1) throw failure('git', diffArgs, diff);
-  if (!(await hasOpenPullRequest(deps.run, branch))) await openPullRequest(deps.run, request);
-  if (!(await viewPullRequest(deps.run, branch)).autoMerge) await turnOnAutoMerge(deps.run, branch);
+  if (!(await hasOpenPullRequest(run, branch))) await openPullRequest(run, request);
+  const found = await viewPullRequest(run, branch);
+  if (hasMerged(found, branch)) return 'merged';
+  if (!found.autoMerge) await turnOnAutoMerge(run, branch);
   const deadline = deps.now() + MERGE_DEADLINE_MS;
   let turnedOnAgain = false;
   while (await pauseBefore(deadline, MERGE_POLL_MS, deps)) {
-    const pullRequest = await viewPullRequest(deps.run, branch);
-    if (pullRequest.state === 'MERGED') return 'merged';
-    if (pullRequest.state === 'CLOSED') {
-      throw new Error(`the pull request from ${branch} was closed without merging`);
-    }
+    const pullRequest = await viewPullRequest(run, branch);
+    if (hasMerged(pullRequest, branch)) return 'merged';
     if (!pullRequest.autoMerge) {
       if (turnedOnAgain) {
         throw new Error(`auto-merge on the pull request from ${branch} was found off a second time`);
       }
-      await turnOnAutoMerge(deps.run, branch);
+      await turnOnAutoMerge(run, branch);
       turnedOnAgain = true;
     }
   }
@@ -360,16 +369,29 @@ export async function publish(
 }
 
 /**
- * Runs a command with its arguments, without a shell, with the environment as it is, and resolves once it has
- * ended with its exit status, null when a signal ended it, and what it printed. Its output is also shown as it
- * arrives, so the log carries pnpm's, the lockfile check's, git's and gh's own lines. It rejects when the command
- * cannot start, as when it is not on PATH.
+ * Runs a command with its arguments, without a shell, in REPO_ROOT, with the environment as it is, and resolves
+ * once it has ended with its exit status, null when a signal ended it, and what it printed. Its output is also
+ * shown as it arrives, so the log carries pnpm's, the lockfile check's, git's and gh's own lines. With timeoutMs,
+ * a command still running by then gets SIGKILL, which it cannot ignore, and the run rejects once it is gone. It
+ * rejects at once when the command cannot start, as when it is not on PATH.
  */
-function run(command: string, args: string[]): Promise<Outcome> {
+export function run(command: string, args: string[], timeoutMs?: number): Promise<Outcome> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let signal: AbortSignal | undefined;
+    let noAnswer: string | undefined;
+    if (timeoutMs !== undefined) {
+      signal = AbortSignal.timeout(timeoutMs);
+      noAnswer = `${command} gave no answer within ${timeoutMs / 1000} s`;
+    }
+    const child = spawn(command, args, {
+      cwd: REPO_ROOT,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      signal,
+      killSignal: 'SIGKILL',
+    });
     let stdout = '';
     let stderr = '';
+    let killed = false;
     child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
       stdout += chunk;
       process.stdout.write(chunk);
@@ -379,31 +401,20 @@ function run(command: string, args: string[]): Promise<Outcome> {
       process.stderr.write(chunk);
     });
     child.on('error', (error: NodeJS.ErrnoException) => {
-      reject(new Error(`${command} cannot start: ${error.code ?? error.message}`));
+      // The bound has sent the kill. The rejection follows on close, once the process is gone.
+      if (error.name === 'AbortError') killed = true;
+      else reject(new Error(`${command} cannot start: ${error.code ?? error.message}`));
     });
-    child.on('close', (status) => resolve({ status, stdout, stderr }));
+    child.on('close', (status) => {
+      if (killed) reject(new Error(noAnswer));
+      else resolve({ status, stdout, stderr });
+    });
   });
-}
-
-/** The JSON body of a GET on url, within FETCH_TIMEOUT_MS. It rejects on a status outside 200 to 299. */
-async function fetchJson(url: string): Promise<unknown> {
-  const signal = AbortSignal.timeout(FETCH_TIMEOUT_MS);
-  try {
-    const response = await fetch(url, { headers: { accept: 'application/json' }, signal });
-    if (!response.ok) {
-      await response.body?.cancel();
-      throw new Error(`HTTP ${response.status}`);
-    }
-    return await response.json();
-  } catch (error) {
-    if (signal.aborted) throw new Error(`no complete answer within ${FETCH_TIMEOUT_MS / 1000} s`);
-    throw error;
-  }
 }
 
 /** This repository's package.json, parsed. */
 function readPackageJson(): unknown {
-  return JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  return JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8'));
 }
 
 async function main(args: string[]): Promise<number> {
@@ -415,7 +426,7 @@ async function main(args: string[]): Promise<number> {
     const clock: Clock = { sleep: (ms) => delay(ms), now: Date.now };
     const outcome =
       action === 'pin'
-        ? await pin(request, { readPackageJson, fetchJson, run, ...clock })
+        ? await pin(request, { readPackageJson, fetchJson: (url) => fetchJson(url, FETCH_TIMEOUT_MS), run, ...clock })
         : await publish(request, { run, ...clock });
     console.log(`bump: ${outcome}`);
     return 0;

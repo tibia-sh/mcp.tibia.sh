@@ -20,7 +20,8 @@ import { after, before, describe, test } from 'node:test';
 import { setImmediate } from 'node:timers/promises';
 import { stringify } from 'yaml';
 import { checkLockfile, download, ghVerify, projectDocument } from '../scripts/check-lockfile.ts';
-import type { Download, FetchJson, Verify } from '../scripts/check-lockfile.ts';
+import type { Download, Verify } from '../scripts/check-lockfile.ts';
+import type { FetchJson } from '../scripts/registry.ts';
 
 const NOW = new Date('2026-09-15T12:00:00.000Z');
 const HOUR_MS = 60 * 60 * 1000;
