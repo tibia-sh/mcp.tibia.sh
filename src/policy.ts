@@ -1,10 +1,11 @@
 /**
  * The Worker's request policy: what it answers itself, what reaches the container, which CORS headers each
- * resource's answers carry, how the rate limit is keyed and charged, and how a failed container fetch is retried.
+ * resource's answers carry, how the rate limit is keyed and charged, when the server card is 304, and how a
+ * failed container fetch is retried.
  *
  * The Worker applies it in this order: route, checkHeaders, readCapped, checkContentType, checkJsonRpcShape,
- * then rateLimitKey and chargeRateLimit, then forwardWithRetry. The first check that rejects a request decides
- * the answer.
+ * chargeClient, then forwardWithRetry. The first check that rejects a request decides the answer. A server
+ * card request goes through route, chargeClient and notModified.
  *
  * Every function works only on its arguments and on the functions it is handed, with web-standard APIs, so
  * the same code runs in the Workers runtime and under node:test.
@@ -42,16 +43,29 @@ export const ENDPOINT_CORS: CorsHeaders = {
   'Access-Control-Max-Age': '86400',
 };
 
+/**
+ * The CORS headers of the server card, on every answer of /wiki/server-card: the card, its 304 and 429, the 405
+ * and the preflight. They are the four the extension's discovery document requires. If-None-Match is allowed so
+ * a browser client can revalidate its cached card, and ETag is exposed so it can read the tag to send back.
+ */
+export const CARD_CORS: CorsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET',
+  'Access-Control-Allow-Headers': 'Content-Type, If-None-Match',
+  'Access-Control-Expose-Headers': 'ETag',
+};
+
 /** What a 405 names in Allow: the methods its resource answers. */
 export type Allow = 'GET, POST, OPTIONS' | 'GET, OPTIONS';
 
 /**
- * Where route sends a request: the landing page, the MCP endpoint, a CORS preflight, or an answer of 404 or
- * 405. A preflight and a 405 carry the CORS headers of their resource.
+ * Where route sends a request: the landing page, the MCP endpoint, the server card, a CORS preflight, or an
+ * answer of 404 or 405. A preflight and a 405 carry the CORS headers of their resource.
  */
 export type Route =
   | { kind: 'landing' }
   | { kind: 'mcp' }
+  | { kind: 'card' }
   | { kind: 'preflight'; cors: CorsHeaders }
   | { kind: 'reject'; status: 404 }
   | { kind: 'reject'; status: 405; allow: Allow; cors: CorsHeaders };
@@ -78,8 +92,10 @@ const BAD_REQUEST: Rejection = { status: 400, body: 'Bad Request' };
  *   A browser sends one before its first MCP request.
  * - GET or HEAD on /, /wiki or /wiki/ with an Accept containing text/html is the landing page.
  * - Any other method on /wiki or /wiki/, a non-HTML GET included, is 405 with the endpoint's CORS headers.
+ * - GET or HEAD on /wiki/server-card is the server card, whatever the Accept. OPTIONS on it is a preflight with
+ *   the card's CORS headers, and any other method is 405 with them.
  * - Every other path is 404. That includes the OAuth discovery paths, so connector clients read the server as
- *   needing no auth.
+ *   needing no auth, and the /.well-known/ paths crawlers probe for a card, which the extension never defined.
  *
  * Paths match exactly and case-sensitively.
  */
@@ -90,9 +106,13 @@ export function route(method: string, pathname: string, accept: string | null): 
   if ((wiki || pathname === '/') && (method === 'GET' || method === 'HEAD') && accept?.includes('text/html')) {
     return { kind: 'landing' };
   }
-  return wiki
-    ? { kind: 'reject', status: 405, allow: 'GET, POST, OPTIONS', cors: ENDPOINT_CORS }
-    : { kind: 'reject', status: 404 };
+  if (wiki) return { kind: 'reject', status: 405, allow: 'GET, POST, OPTIONS', cors: ENDPOINT_CORS };
+  if (pathname === '/wiki/server-card') {
+    if (method === 'GET' || method === 'HEAD') return { kind: 'card' };
+    if (method === 'OPTIONS') return { kind: 'preflight', cors: CARD_CORS };
+    return { kind: 'reject', status: 405, allow: 'GET, OPTIONS', cors: CARD_CORS };
+  }
+  return { kind: 'reject', status: 404 };
 }
 
 /**
@@ -235,6 +255,34 @@ export async function chargeRateLimit(
     if (!success) return false;
   }
   return true;
+}
+
+/**
+ * Charges a client's messages to the rate limit under the key of its CF-Connecting-IP, and answers as
+ * chargeRateLimit does: false at the first call that fails. The platform sets the header on every request, so a
+ * missing one is a fault, and throws before any call.
+ */
+export async function chargeClient(
+  limit: (options: { key: string }) => Promise<{ success: boolean }>,
+  ip: string | null,
+  messages: number,
+): Promise<boolean> {
+  if (ip === null) throw new Error('the request has no CF-Connecting-IP header');
+  return chargeRateLimit(limit, rateLimitKey(ip), messages);
+}
+
+/**
+ * Whether a request's If-None-Match names the tag of the answer it would get, so the answer is 304 instead. The
+ * comparison is weak, as RFC 9110 section 13.1.2 says: the header is a comma-separated list of entity tags,
+ * each optionally prefixed W/, and the prefix is ignored on both sides. A header of * matches, and no header
+ * matches nothing. etag is the quoted tag the Worker built, so a tag sent without its quotes never matches.
+ */
+export function notModified(ifNoneMatch: string | null, etag: string): boolean {
+  if (ifNoneMatch === null) return false;
+  if (ifNoneMatch === '*') return true;
+  const opaqueTag = (tag: string) => (tag.startsWith('W/') ? tag.slice(2) : tag);
+  const expected = opaqueTag(etag);
+  return ifNoneMatch.split(',').some((tag) => opaqueTag(tag.trim()) === expected);
 }
 
 /** Whether a container fetch is retried: after a throw, or a status of 500 or above. */
