@@ -1,15 +1,15 @@
 /**
  * The Worker end to end, in `wrangler dev` with local containers.
  *
- * - Everything the Worker answers itself leaves the container asleep: the landing page, 404, 405, the preflight,
- *   413, 415 and 400. The 413 and 415 requests also break later rules, so they prove the order of the checks too.
- *   The test counts this session's dev containers when wrangler is ready and after those checks.
+ * - Everything the Worker answers itself leaves the container asleep: the landing page, 404, 405, the preflights,
+ *   the server card, 413, 415 and 400. The 413 and 415 requests also break later rules, so they prove the order
+ *   of the checks too. The test counts this session's dev containers when wrangler is ready and after those checks.
  * - Every answer of the endpoint carries the whole endpoint CORS set, the Worker's own and the container's alike,
- *   and the landing page and a 404 carry none.
+ *   every answer of the server card carries the whole card set, and the landing page and a 404 carry none.
  * - MCP requests reach the container, which serves the pinned artifact. A chunked request reaches it as well,
  *   which proves that the forwarded request carries Content-Length (spec 12, item 4). A request with Origin
  *   reaches it too, as a browser client's does.
- * - The rate limit is charged once per JSON-RPC message.
+ * - The rate limit is charged once per JSON-RPC message, and once per server card request.
  *
  * wrangler runs without Cloudflare credentials, and keeps its local state in a directory of its own. Miniflare
  * stores the rate limiter's count there, so a session that shared .wrangler/state with an earlier one in the same
@@ -37,6 +37,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { credentialFreeEnv } from '../scripts/check-config.ts';
 import { deployedCommit, expectedArtifact, mismatches, probe } from '../scripts/served-artifact.ts';
+import { SERVER_CARD } from '../src/server-card.ts';
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 /** How long wrangler dev may take to build the image and print "Ready on". A cold CI runner pulls both images. */
@@ -68,6 +69,15 @@ const ENDPOINT_CORS = {
   'access-control-expose-headers': 'Retry-After',
   'access-control-max-age': '86400',
 };
+/** The whole CORS set of every server card answer, with the names as Headers iterates them. */
+const CARD_CORS = {
+  'access-control-allow-headers': 'Content-Type, If-None-Match',
+  'access-control-allow-methods': 'GET',
+  'access-control-allow-origin': '*',
+  'access-control-expose-headers': 'ETag',
+};
+/** The server card's media type. */
+const SERVER_CARD_TYPE = 'application/mcp-server-card+json';
 
 let wrangler: ChildProcessByStdio<null, Readable, Readable> | undefined;
 let spawnError: Error | undefined;
@@ -271,8 +281,8 @@ function request(path: string, init: RequestInit = {}): Promise<Response> {
 }
 
 /** Every Access-Control-* header of an answer, by name, so a comparison sees a missing and a surplus header alike. */
-function corsHeaders(response: Response): Record<string, string> {
-  return Object.fromEntries([...response.headers].filter(([name]) => name.startsWith('access-control-')));
+function corsHeaders(answer: { headers: Headers }): Record<string, string> {
+  return Object.fromEntries([...answer.headers].filter(([name]) => name.startsWith('access-control-')));
 }
 
 /**
@@ -328,11 +338,14 @@ function postChunked(path: string, headers: Record<string, string>, bytes: Uint8
   return request(path, init);
 }
 
+/** The answer to a HEAD request as it went over the wire: its status, its headers, and whatever followed them. */
+type HeadAnswer = { status: string | undefined; headers: Headers; afterHeaders: string; raw: string };
+
 /**
- * The raw answer to a HEAD request, read until wrangler closes the connection. fetch never reads a body after a
- * HEAD, so only the bytes on the wire can show whether one was sent.
+ * The answer to a HEAD request, read until wrangler closes the connection and parsed from the bytes on the wire.
+ * fetch never reads a body after a HEAD, so only those bytes can show whether one was sent.
  */
-function rawHead(path: string): Promise<string> {
+function head(path: string, accept: string): Promise<HeadAnswer> {
   const { host, hostname, port } = devServer();
   return new Promise((resolve, reject) => {
     const socket = net.connect(Number(port), hostname);
@@ -341,9 +354,23 @@ function rawHead(path: string): Promise<string> {
       socket.destroy(new Error(`HEAD ${path} did not end within ${REQUEST_MS / 1000} s`));
     });
     socket.on('data', (chunk: Buffer) => chunks.push(chunk));
-    socket.on('end', () => resolve(Buffer.concat(chunks).toString('latin1')));
+    socket.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('latin1');
+      const end = raw.indexOf('\r\n\r\n');
+      if (end === -1) {
+        reject(new Error(`the answer to HEAD ${path} never ends its headers: ${JSON.stringify(raw)}`));
+        return;
+      }
+      const [statusLine = '', ...fields] = raw.slice(0, end).split('\r\n');
+      const headers = new Headers();
+      for (const field of fields) {
+        const colon = field.indexOf(':');
+        headers.append(field.slice(0, colon), field.slice(colon + 1).trim());
+      }
+      resolve({ status: statusLine.split(' ')[1], headers, afterHeaders: raw.slice(end + 4), raw });
+    });
     socket.on('error', reject);
-    socket.write(`HEAD ${path} HTTP/1.1\r\nHost: ${host}\r\nAccept: text/html\r\nConnection: close\r\n\r\n`);
+    socket.write(`HEAD ${path} HTTP/1.1\r\nHost: ${host}\r\nAccept: ${accept}\r\nConnection: close\r\n\r\n`);
   });
 }
 
@@ -406,24 +433,16 @@ test('the landing page answers GET on / and /wiki, and HEAD on /, with the deplo
   }
 
   // Spec 12, item 5: the answer ends with its headers.
-  const answer = await rawHead('/');
-  const end = answer.indexOf('\r\n\r\n');
-  assert.notEqual(end, -1, `the HEAD answer never ends its headers: ${JSON.stringify(answer)}`);
-  const [statusLine = '', ...fields] = answer.slice(0, end).split('\r\n');
-  const headers = new Headers();
-  for (const field of fields) {
-    const colon = field.indexOf(':');
-    headers.append(field.slice(0, colon), field.slice(colon + 1).trim());
-  }
+  const answer = await head('/', 'text/html');
   assert.deepEqual(
     {
-      status: statusLine.split(' ')[1],
-      contentType: headers.get('content-type'),
-      commit: headers.get('x-deploy-commit'),
-      afterHeaders: answer.slice(end + 4),
+      status: answer.status,
+      contentType: answer.headers.get('content-type'),
+      commit: answer.headers.get('x-deploy-commit'),
+      afterHeaders: answer.afterHeaders,
     },
     { status: '200', contentType: 'text/html; charset=utf-8', commit: 'local', afterHeaders: '' },
-    `HEAD /: ${JSON.stringify(answer)}`,
+    `HEAD /: ${JSON.stringify(answer.raw)}`,
   );
 
   assert.equal(await deployedCommit(new URL('/wiki', devServer()), AbortSignal.timeout(REQUEST_MS)), 'local');
@@ -437,6 +456,7 @@ test('unknown paths and POST / are 404', async () => {
       '/.well-known/oauth-protected-resource',
       { headers: { accept: 'application/json' } },
     ],
+    ['GET /.well-known/mcp/server-card', '/.well-known/mcp/server-card', { headers: { accept: SERVER_CARD_TYPE } }],
     ['POST /', '/', { method: 'POST', headers: MCP_HEADERS, body: TOOLS_LIST }],
   ];
   for (const [label, path, init] of requests) {
@@ -468,6 +488,90 @@ test('a preflight on /wiki is 204 with no body and the CORS headers', async () =
   assert.deepEqual(
     { status: response.status, cors: corsHeaders(response), body: await response.text() },
     { status: 204, cors: ENDPOINT_CORS, body: '' },
+  );
+});
+
+test('the server card answers GET, HEAD and a matching If-None-Match with the card headers', async () => {
+  // The tag is the deploy commit, which the landing page answers as x-deploy-commit.
+  const etag = `"${await deployedCommit(devServer(), AbortSignal.timeout(REQUEST_MS))}"`;
+  const card = await request('/wiki/server-card', { headers: { accept: SERVER_CARD_TYPE } });
+  assert.deepEqual(
+    {
+      status: card.status,
+      contentType: card.headers.get('content-type'),
+      cacheControl: card.headers.get('cache-control'),
+      etag: card.headers.get('etag'),
+      cors: corsHeaders(card),
+      body: await card.text(),
+    },
+    {
+      status: 200,
+      contentType: SERVER_CARD_TYPE,
+      cacheControl: 'public, max-age=3600',
+      etag,
+      cors: CARD_CORS,
+      body: SERVER_CARD,
+    },
+    'GET',
+  );
+
+  // The same headers and no body. Content-Length differs, so the headers are compared by name.
+  const answer = await head('/wiki/server-card', SERVER_CARD_TYPE);
+  assert.deepEqual(
+    {
+      status: answer.status,
+      contentType: answer.headers.get('content-type'),
+      cacheControl: answer.headers.get('cache-control'),
+      etag: answer.headers.get('etag'),
+      cors: corsHeaders(answer),
+      afterHeaders: answer.afterHeaders,
+    },
+    {
+      status: '200',
+      contentType: SERVER_CARD_TYPE,
+      cacheControl: 'public, max-age=3600',
+      etag,
+      cors: CARD_CORS,
+      afterHeaders: '',
+    },
+    `HEAD: ${JSON.stringify(answer.raw)}`,
+  );
+
+  const revalidation = await request('/wiki/server-card', {
+    headers: { accept: SERVER_CARD_TYPE, 'if-none-match': etag },
+  });
+  assert.deepEqual(
+    {
+      status: revalidation.status,
+      etag: revalidation.headers.get('etag'),
+      cors: corsHeaders(revalidation),
+      body: await revalidation.text(),
+    },
+    { status: 304, etag, cors: CARD_CORS, body: '' },
+    'GET with If-None-Match',
+  );
+});
+
+test('a preflight on /wiki/server-card is 204, and a POST on it is 405 with Allow: GET, OPTIONS', async () => {
+  // What a browser sends before a page revalidates its cached card.
+  const preflight = await request('/wiki/server-card', {
+    method: 'OPTIONS',
+    headers: {
+      origin: 'https://example.com',
+      'access-control-request-method': 'GET',
+      'access-control-request-headers': 'if-none-match',
+    },
+  });
+  assert.deepEqual(
+    { status: preflight.status, cors: corsHeaders(preflight), body: await preflight.text() },
+    { status: 204, cors: CARD_CORS, body: '' },
+    'OPTIONS',
+  );
+  // An MCP-shaped POST on the card path is not the endpoint, so it is 405 and wakes nothing.
+  assert.deepEqual(
+    await summary(await request('/wiki/server-card', { method: 'POST', headers: MCP_HEADERS, body: TOOLS_LIST })),
+    workerAnswer(405, 'Method Not Allowed', { allow: 'GET, OPTIONS', cors: CARD_CORS }),
+    'POST',
   );
 });
 
@@ -536,30 +640,49 @@ test('an MCP request with Origin reaches the container, and its answer carries t
   });
   const body = await response.text();
   assert.equal(response.status, 200, `a tools/list with Origin: ${body.slice(0, 200)}`);
+  // The container answers with an event stream, and the Worker passes its type on with the body.
+  assert.match(response.headers.get('content-type') ?? '', /^text\/event-stream(;|$)/);
   assert.deepEqual(corsHeaders(response), ENDPOINT_CORS, 'the CORS headers of a tools/list with Origin');
   const tools = toolsIn(body);
   assert.ok(Array.isArray(tools) && tools.length > 0, `no tools in ${body.slice(0, 200)}`);
 });
 
-test('the rate limit is charged once per JSON-RPC message', async () => {
+test('the rate limit is charged once per JSON-RPC message, and once per server card request', async () => {
   // Miniflare's rate limiter counts exactly, in fixed windows aligned to the wall-clock minute. Starting just after
-  // a boundary gives the two requests below a whole window.
+  // a boundary gives the requests below a whole window.
   const boundary = Math.ceil(Date.now() / 60_000) * 60_000;
   await delay(boundary + 500 - Date.now());
-  const notifications = Array.from({ length: 300 }, () => ({ jsonrpc: '2.0', method: 'notifications/initialized' }));
+  const notifications = Array.from({ length: 299 }, () => ({ jsonrpc: '2.0', method: 'notifications/initialized' }));
   const batch = await summary(
     await request('/wiki', { method: 'POST', headers: MCP_HEADERS, body: JSON.stringify(notifications) }),
   );
+  const card = await summary(await request('/wiki/server-card', { headers: { accept: SERVER_CARD_TYPE } }));
   const next = await summary(await request('/wiki', { method: 'POST', headers: MCP_HEADERS, body: TOOLS_LIST }));
+  const cardPastTheLimit = await summary(
+    await request('/wiki/server-card', { headers: { accept: SERVER_CARD_TYPE } }),
+  );
+  const preflight = await summary(
+    await request('/wiki', {
+      method: 'OPTIONS',
+      headers: { origin: 'https://example.com', 'access-control-request-method': 'POST' },
+    }),
+  );
   const seconds = (Date.now() - boundary) / 1000;
   assert.ok(
     seconds < 55,
-    `the two POSTs ended ${seconds} s into their rate-limit window, too close to the next window to show anything`,
+    `the five requests ended ${seconds} s into their rate-limit window, too close to the next window to show anything`,
   );
-  assert.notEqual(batch.status, 429, `a batch of 300 messages, the whole limit: ${JSON.stringify(batch)}`);
+  assert.notEqual(batch.status, 429, `a batch of 299 messages: ${JSON.stringify(batch)}`);
+  assert.equal(card.status, 200, `the card as unit 300, the whole limit: ${JSON.stringify(card)}`);
   assert.deepEqual(
     next,
     workerAnswer(429, 'Too Many Requests', { retryAfter: '60', cors: ENDPOINT_CORS }),
     'message 301',
   );
+  assert.deepEqual(
+    cardPastTheLimit,
+    workerAnswer(429, 'Too Many Requests', { retryAfter: '60', cors: CARD_CORS }),
+    'the card past the limit',
+  );
+  assert.equal(preflight.status, 204, `a preflight past the limit: ${JSON.stringify(preflight)}`);
 });

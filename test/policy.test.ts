@@ -7,11 +7,13 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { setImmediate } from 'node:timers/promises';
 import {
+  chargeClient,
   chargeRateLimit,
   checkContentType,
   checkHeaders,
   checkJsonRpcShape,
   forwardWithRetry,
+  notModified,
   rateLimitKey,
   readCapped,
   route,
@@ -43,6 +45,14 @@ const ENDPOINT_CORS = {
   'Access-Control-Allow-Headers': '*',
   'Access-Control-Expose-Headers': 'Retry-After',
   'Access-Control-Max-Age': '86400',
+};
+
+/** The CORS headers of every answer of the server card. */
+const CARD_CORS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET',
+  'Access-Control-Allow-Headers': 'Content-Type, If-None-Match',
+  'Access-Control-Expose-Headers': 'ETag',
 };
 
 describe('route', () => {
@@ -107,6 +117,36 @@ describe('route', () => {
     ],
   );
 
+  routes('GET and HEAD on /wiki/server-card are the server card, whatever the Accept', { kind: 'card' }, [
+    ['GET', '/wiki/server-card', null],
+    ['GET', '/wiki/server-card', 'application/mcp-server-card+json'],
+    ['GET', '/wiki/server-card', BROWSER_ACCEPT],
+    ['GET', '/wiki/server-card', MCP_ACCEPT],
+    ['HEAD', '/wiki/server-card', null],
+    ['HEAD', '/wiki/server-card', 'text/html'],
+  ]);
+
+  routes(
+    'OPTIONS on /wiki/server-card is a preflight with the card CORS headers',
+    { kind: 'preflight', cors: CARD_CORS },
+    [
+      ['OPTIONS', '/wiki/server-card', null],
+      ['OPTIONS', '/wiki/server-card', BROWSER_ACCEPT],
+    ],
+  );
+
+  routes(
+    'any other method on /wiki/server-card is 405 with Allow: GET, OPTIONS and the card CORS headers',
+    { kind: 'reject', status: 405, allow: 'GET, OPTIONS', cors: CARD_CORS },
+    [
+      ['POST', '/wiki/server-card', MCP_ACCEPT],
+      ['POST', '/wiki/server-card', null],
+      ['DELETE', '/wiki/server-card', null],
+      ['PUT', '/wiki/server-card', null],
+      ['PATCH', '/wiki/server-card', null],
+    ],
+  );
+
   routes('everything else is 404', { kind: 'reject', status: 404 }, [
     ['GET', '/', null],
     ['GET', '/', MCP_ACCEPT],
@@ -118,6 +158,7 @@ describe('route', () => {
     ['GET', '/.well-known/oauth-protected-resource', 'application/json'],
     ['GET', '/.well-known/oauth-protected-resource/wiki', 'application/json'],
     ['GET', '/.well-known/oauth-authorization-server', 'application/json'],
+    ['GET', '/.well-known/mcp/server-card', 'application/mcp-server-card+json'],
     ['GET', '/robots.txt', BROWSER_ACCEPT],
     ['POST', '/mcp', MCP_ACCEPT],
   ]);
@@ -132,6 +173,9 @@ describe('route', () => {
     ['POST', '/wiki/mcp', MCP_ACCEPT],
     ['POST', '/wikis', MCP_ACCEPT],
     ['GET', '//', BROWSER_ACCEPT],
+    ['GET', '/wiki/server-card/', null],
+    ['GET', '/wiki/Server-Card', null],
+    ['OPTIONS', '/wiki/server-card/', null],
   ]);
 });
 
@@ -139,8 +183,7 @@ describe('checkHeaders', () => {
   const PAYLOAD_TOO_LARGE = { status: 413, body: 'Payload Too Large' };
 
   test('an Origin header passes', () => {
-    const headers = new Headers({ origin: 'https://example.com', 'content-type': 'application/json' });
-    assert.equal(checkHeaders(headers), null);
+    assert.equal(checkHeaders(new Headers({ origin: 'https://example.com' })), null);
   });
 
   test('an empty Origin header passes', () => {
@@ -358,28 +401,28 @@ describe('rateLimitKey', () => {
   });
 });
 
-describe('chargeRateLimit', () => {
-  /**
-   * A limiter that answers each call with the next of successes after a turn of the event loop. It records
-   * the calls, and the most calls it had in flight at once.
-   */
-  function fakeLimiter(successes: boolean[]) {
-    const calls: { key: string }[] = [];
-    let inFlight = 0;
-    let maxInFlight = 0;
-    const limit = async (options: { key: string }) => {
-      const success = successes[calls.length];
-      calls.push(options);
-      inFlight += 1;
-      maxInFlight = Math.max(maxInFlight, inFlight);
-      await setImmediate();
-      inFlight -= 1;
-      assert.ok(success !== undefined, `limit was called ${calls.length} times, more than the test allows`);
-      return { success };
-    };
-    return { limit, calls, maxInFlight: () => maxInFlight };
-  }
+/**
+ * A limiter that answers each call with the next of successes after a turn of the event loop. It records
+ * the calls, and the most calls it had in flight at once.
+ */
+function fakeLimiter(successes: boolean[]) {
+  const calls: { key: string }[] = [];
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const limit = async (options: { key: string }) => {
+    const success = successes[calls.length];
+    calls.push(options);
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    await setImmediate();
+    inFlight -= 1;
+    assert.ok(success !== undefined, `limit was called ${calls.length} times, more than the test allows`);
+    return { success };
+  };
+  return { limit, calls, maxInFlight: () => maxInFlight };
+}
 
+describe('chargeRateLimit', () => {
   test('3 messages under budget make 3 calls, one at a time, and pass', async () => {
     const limiter = fakeLimiter([true, true, true]);
     assert.equal(await chargeRateLimit(limiter.limit, '203.0.113.7', 3), true);
@@ -399,6 +442,79 @@ describe('chargeRateLimit', () => {
       await assert.rejects(chargeRateLimit(limiter.limit, '203.0.113.7', messages), RangeError, `messages ${messages}`);
       assert.equal(limiter.calls.length, 0, `messages ${messages}`);
     }
+  });
+});
+
+describe('chargeClient', () => {
+  test('a missing CF-Connecting-IP throws before any call', async () => {
+    const limiter = fakeLimiter([true]);
+    await assert.rejects(chargeClient(limiter.limit, null, 1), {
+      name: 'Error',
+      message: 'the request has no CF-Connecting-IP header',
+    });
+    assert.equal(limiter.calls.length, 0);
+  });
+
+  test('an IPv4 address is charged under its own key, once per message', async () => {
+    const limiter = fakeLimiter([true, true, true]);
+    assert.equal(await chargeClient(limiter.limit, '203.0.113.7', 3), true);
+    assert.deepEqual(limiter.calls, [{ key: '203.0.113.7' }, { key: '203.0.113.7' }, { key: '203.0.113.7' }]);
+  });
+
+  test('an IPv6 address is charged under its /64', async () => {
+    const limiter = fakeLimiter([true]);
+    assert.equal(await chargeClient(limiter.limit, '2001:db8:1:2::1', 1), true);
+    assert.deepEqual(limiter.calls, [{ key: '2001:db8:1:2::/64' }]);
+  });
+
+  test('a failed charge is false', async () => {
+    const limiter = fakeLimiter([false]);
+    assert.equal(await chargeClient(limiter.limit, '203.0.113.7', 1), false);
+    assert.equal(limiter.calls.length, 1);
+  });
+});
+
+describe('notModified', () => {
+  const ETAG = '"0a1b2c3d"';
+
+  test('no If-None-Match is false', () => {
+    assert.equal(notModified(null, ETAG), false);
+  });
+
+  test('* is true', () => {
+    assert.equal(notModified('*', ETAG), true);
+  });
+
+  test('the tag is true', () => {
+    assert.equal(notModified('"0a1b2c3d"', ETAG), true);
+  });
+
+  test('the tag marked weak is true', () => {
+    assert.equal(notModified('W/"0a1b2c3d"', ETAG), true);
+  });
+
+  test('a list with the tag second is true', () => {
+    assert.equal(notModified('"other","0a1b2c3d"', ETAG), true);
+  });
+
+  test('a list with spaces around its tags is true', () => {
+    assert.equal(notModified('"other" , W/"0a1b2c3d" , "third"', ETAG), true);
+  });
+
+  test('the prefix is ignored on the ETag side too', () => {
+    assert.equal(notModified('"0a1b2c3d"', 'W/"0a1b2c3d"'), true);
+  });
+
+  test('a different tag is false', () => {
+    assert.equal(notModified('"other"', ETAG), false);
+  });
+
+  test('a list without the tag is false', () => {
+    assert.equal(notModified('"other", W/"third"', ETAG), false);
+  });
+
+  test('the tag unquoted is false', () => {
+    assert.equal(notModified('0a1b2c3d', ETAG), false);
   });
 });
 

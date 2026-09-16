@@ -12,7 +12,8 @@ It serves the same five tools as a local install, over Streamable HTTP. The land
 ## Rate limit
 
 The Worker allows about 300 JSON-RPC messages per 60 s from each IPv4 address or IPv6 /64. Every message in a
-batch counts. Past the limit, it answers `429` with `Retry-After: 60`.
+batch counts. A request for the server card counts as one message. Past the limit, it answers `429` with
+`Retry-After: 60`.
 
 The limit is approximate. Cloudflare counts it per location and applies it permissively. claude.ai users share
 Anthropic's egress IPs, so they share one allowance.
@@ -24,6 +25,17 @@ configuration from you. Every answer of `/wiki` but the landing page carries the
 client can read `Retry-After` on a `429`. A web page can make its visitors' browsers call the endpoint and spend
 each visitor's own per-IP allowance, which costs those visitors a `429` for up to a minute and reaches no state or
 non-public data.
+
+## The server card
+
+`https://mcp.tibia.sh/wiki/server-card` serves the endpoint's MCP Server Card, a JSON document that describes the
+server before you connect. It follows the experimental extension `io.modelcontextprotocol/server-card`, SEP-2127.
+The answer carries `Content-Type: application/mcp-server-card+json`, `Cache-Control: public, max-age=3600`, an
+`ETag` that is the deployed commit in double quotes, and the four CORS headers the extension requires. A `GET`
+with a matching `If-None-Match` gets `304`. The card's `$schema` is
+`https://static.modelcontextprotocol.io/schemas/v1/server-card.schema.json`, the identifier the extension's schema
+requires. That URL did not resolve when this was written. The `/.well-known/` paths some crawlers probe for a
+card stay `404`.
 
 ## Privacy
 

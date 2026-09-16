@@ -16,8 +16,7 @@ const HELPERS = [
   'readCapped',
   'checkContentType',
   'checkJsonRpcShape',
-  'rateLimitKey',
-  'chargeRateLimit',
+  'chargeClient',
   'forwardWithRetry',
 ];
 
