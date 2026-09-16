@@ -142,7 +142,7 @@ function removeSessionArtifacts(): void {
   if (failures.length > 0) throw new AggregateError(failures, 'the cleanup of this wrangler dev session failed');
 }
 
-/** Signals every process in wrangler's process group: npx, wrangler and workerd. */
+/** Signals every process in wrangler's process group: pnpm, wrangler and workerd. */
 function signalGroup(pgid: number, signal: NodeJS.Signals): void {
   try {
     process.kill(-pgid, signal);
@@ -207,8 +207,8 @@ before(async () => {
   const port = await freePort();
   stateDir = mkdtempSync(join(tmpdir(), 'mcp-tibia-sh-wrangler-dev-'));
   const args = ['dev', '--ip', '127.0.0.1', '--port', String(port), '--show-interactive-dev-session=false'];
-  // In its own process group, so cleanup can signal npx and every process it started at once.
-  const child = spawn('npx', ['wrangler', ...args, '--persist-to', stateDir], {
+  // In its own process group, so cleanup can signal pnpm and every process it started at once.
+  const child = spawn('pnpm', ['exec', 'wrangler', ...args, '--persist-to', stateDir], {
     cwd: REPO_ROOT,
     env: credentialFreeEnv(),
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -225,7 +225,7 @@ before(async () => {
   }
   const deadline = Date.now() + READY_MS;
   while (!output.includes('Ready on')) {
-    if (spawnError !== undefined) throw new Error(`npx wrangler dev did not start: ${spawnError.message}`);
+    if (spawnError !== undefined) throw new Error(`pnpm exec wrangler dev did not start: ${spawnError.message}`);
     if (child.exitCode !== null || child.signalCode !== null) {
       throw new Error(`wrangler dev exited before it was ready:\n${output}`);
     }

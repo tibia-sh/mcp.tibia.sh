@@ -20,7 +20,9 @@ const PINNED = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+@[0-9a-f]{40}$/;
 /** The required checks, which are ci.yml's job IDs. */
 const REQUIRED_JOBS = ['container', 'unit', 'worker'];
 /** What the wrangler deploy step of deploy.yml's deploy job runs. It is the one step that gets the deploy token. */
-const WRANGLER_DEPLOY = 'npx wrangler deploy --var DEPLOY_COMMIT:${{ github.sha }}';
+const WRANGLER_DEPLOY = 'pnpm exec wrangler deploy --var DEPLOY_COMMIT:${{ github.sha }}';
+/** What the deploy job runs before wrangler deploy: the registry's signature on every installed package, verified. */
+const AUDIT_SIGNATURES = 'pnpm audit signatures';
 /** What the last step of deploy.yml's smoke job runs: the served-artifact check of the live URL, for this commit. */
 const SMOKE_CHECK =
   'node scripts/served-artifact.ts https://mcp.tibia.sh/wiki --wait-seconds 600 --expect-commit ${{ github.sha }}';
@@ -156,19 +158,38 @@ test(`every uses: is ${LOCAL_CI} or an action pinned by a full commit SHA`, () =
   assert.deepEqual(unpinned, []);
 });
 
-test('every actions/checkout step has exactly with: { persist-credentials: false }', () => {
-  const checkouts = allNodes().filter(
-    ({ key, value }) => key === 'uses' && typeof value === 'string' && /^actions\/checkout@/i.test(value),
-  );
-  assert.ok(checkouts.length > 0, 'no workflow has an actions/checkout step');
-  // Any other input, a ref above all, could check out a commit other than the one CI tested or deploy.yml labels.
-  const differing = checkouts
-    .filter(({ holder }) => {
-      const inputs = isMapping(holder) ? holder['with'] : undefined;
-      return !isDeepStrictEqual(inputs, { 'persist-credentials': false });
-    })
+/** The uses: node of every step in every workflow whose action matches action. There must be at least one. */
+function stepsUsing(action: RegExp, label: string): Node[] {
+  const steps = allNodes().filter(({ key, value }) => key === 'uses' && typeof value === 'string' && action.test(value));
+  assert.ok(steps.length > 0, `no workflow has ${label} step`);
+  return steps;
+}
+
+/** Where each of steps has a with: other than exactly inputs. */
+function differingInputs(steps: Node[], inputs: Mapping): string[] {
+  return steps
+    .filter(({ holder }) => !isDeepStrictEqual(isMapping(holder) ? holder['with'] : undefined, inputs))
     .map(({ where }) => where);
-  assert.deepEqual(differing, []);
+}
+
+test('every actions/checkout step has exactly with: { persist-credentials: false }', () => {
+  const checkouts = stepsUsing(/^actions\/checkout@/i, 'an actions/checkout');
+  // Any other input, a ref above all, could check out a commit other than the one CI tested or deploy.yml labels.
+  assert.deepEqual(differingInputs(checkouts, { 'persist-credentials': false }), []);
+});
+
+test("every actions/setup-node step has exactly with: { node-version: '26', package-manager-cache: false }", () => {
+  const setups = stepsUsing(/^actions\/setup-node@/i, 'an actions/setup-node');
+  // node-version is the Node every job runs on. setup-node caches by itself whenever package.json names a
+  // packageManager, and package-manager-cache: false keeps a job from restoring what another run saved.
+  assert.deepEqual(differingInputs(setups, { 'node-version': '26', 'package-manager-cache': false }), []);
+});
+
+test('every pnpm/setup step has exactly with: { install: true, require-lockfile: true }', () => {
+  const setups = stepsUsing(/^pnpm\/setup@/i, 'a pnpm/setup');
+  // Together the two inputs run pnpm install --frozen-lockfile, and fail without pnpm-lock.yaml. Any other input
+  // could install a pnpm other than the one packageManager pins, or restore a store another run saved.
+  assert.deepEqual(differingInputs(setups, { install: true, 'require-lockfile': true }), []);
 });
 
 test("every workflow's top-level permissions are exactly { contents: read }, and no job sets permissions", () => {
@@ -331,13 +352,13 @@ test("deploy.yml's smoke job needs deploy and has no environment", () => {
   );
 });
 
-test("deploy.yml's deploy job runs npm audit signatures, then wrangler deploy", () => {
+test("deploy.yml's deploy job runs pnpm audit signatures, then wrangler deploy", () => {
   const steps = stepsOf('deploy.yml', 'deploy');
-  const audit = stepRunning(steps, 'npm audit signatures', 'deploy.yml jobs.deploy').at;
+  const audit = stepRunning(steps, AUDIT_SIGNATURES, 'deploy.yml jobs.deploy').at;
   const deploy = stepRunning(steps, WRANGLER_DEPLOY, 'deploy.yml jobs.deploy').at;
   assert.ok(
     audit < deploy,
-    `deploy.yml jobs.deploy runs npm audit signatures at step ${audit}, after wrangler deploy at step ${deploy}`,
+    `deploy.yml jobs.deploy runs ${AUDIT_SIGNATURES} at step ${audit}, after wrangler deploy at step ${deploy}`,
   );
 });
 

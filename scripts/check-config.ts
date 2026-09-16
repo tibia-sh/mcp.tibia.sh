@@ -3,9 +3,9 @@
  *
  *   node scripts/check-config.ts
  *
- * It runs `npx wrangler types --check`, then `npx wrangler deploy --dry-run`, both without Cloudflare credentials,
- * and passes their output through. It exits 1 if either exits non-zero or prints a line containing [WARNING], and
- * 0 otherwise.
+ * It runs `pnpm exec wrangler types --check`, then `pnpm exec wrangler deploy --dry-run`, both without Cloudflare
+ * credentials, and passes their output through. It exits 1 if either exits non-zero or prints a line containing
+ * [WARNING], and 0 otherwise.
  *
  * - wrangler only warns about an unknown config key, so a warning fails the check.
  * - `types --check` fails when worker-configuration.d.ts no longer matches the config.
@@ -52,13 +52,13 @@ export function credentialFreeEnv(): NodeJS.ProcessEnv {
 type Outcome = { code: number | null; signal: NodeJS.Signals | null; warnings: string[] };
 
 /**
- * Runs `npx wrangler <args>` from the repo root, passing its output through. It resolves with how the process
+ * Runs `pnpm exec wrangler <args>` from the repo root, passing its output through. It resolves with how the process
  * ended and the lines of its output that contain [WARNING]. wrangler colours that label even when its output is
  * piped, so lines are matched without their control sequences.
  */
 function runWrangler(args: string[]): Promise<Outcome> {
   return new Promise((resolve, reject) => {
-    const child = spawn('npx', ['wrangler', ...args], {
+    const child = spawn('pnpm', ['exec', 'wrangler', ...args], {
       cwd: REPO_ROOT,
       env: credentialFreeEnv(),
       stdio: ['ignore', 'pipe', 'pipe'],
