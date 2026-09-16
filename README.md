@@ -29,13 +29,26 @@ Cloudflare attaches the request URL to the Worker's log events, with your query 
 
 ## How a release reaches the endpoint
 
-1. A new `@tibia.sh/tibiawiki-mcp` or `@tibia.sh/tibiawiki-data` release reaches npm. A pull request bumps the
-   `@tibia.sh/*` pins. Until the release trigger lands, open it by hand with
-   `pnpm add --save-exact <package>@<version>`.
-2. CI runs the required checks `unit`, `container` and `worker` on the pull request. No job reads a secret, so
+1. The release workflow of [`tibiawiki-mcp`](https://github.com/tibia-sh/tibiawiki-mcp) or
+   [`tibiawiki-data`](https://github.com/tibia-sh/tibiawiki-data) publishes to npm. Its `hosting` job then sends this
+   repository a `repository_dispatch` of type `first-party-release` naming the package and the version, with the
+   token of its `release-trigger` environment.
+2. The dispatch starts `bump.yml`. Its `bump` job runs in the `release-trigger` environment on the tip of `main`.
+   Runs queue one after the other, so a second release pins on the `main` the first one merged.
+   - `node scripts/bump.ts pin` runs without the token. It refuses any package but the two above, any version that
+     is not an exact `1.2.3`, and any version below the pin. The pinned version ends it with `bump: already-pinned`.
+     Otherwise it waits up to 10 minutes for npm to serve the version with a provenance attestation, runs
+     `pnpm add --save-exact`, then `scripts/check-lockfile.ts` on the result.
+   - `node scripts/bump.ts publish` is the one step with the token. Unchanged files end it with
+     `bump: nothing-to-publish`, and the run is green. Otherwise it pushes the branch `bump/<name>-<version>` and
+     opens the pull request `chore(deps): bump <package> to <version>`, or reuses the open one, turns auto-merge on
+     and waits up to 30 minutes for the merge.
+3. CI runs the required checks `unit`, `container` and `worker` on the pull request. No job reads a secret, so
    every pull request runs every check. `container` builds the image and checks that it serves the pinned server
    version and index.
-3. You merge the pull request once the checks pass. The push to `main` runs `deploy.yml`:
+4. Auto-merge rebases the pull request onto `main` once the checks pass. The ruleset has no bypass actors, so
+   nothing merges before they do. The `bump` run ends green with `bump: merged`, and GitHub deletes the branch.
+5. The push to `main` runs `deploy.yml`:
    - `ci` runs the same checks on the merged commit.
    - `deploy` runs `pnpm audit signatures`, then `pnpm exec wrangler deploy` with the token of the
      `cloudflare-production` environment. wrangler builds and pushes the image, and deploys the Worker with the
@@ -43,6 +56,22 @@ Cloudflare attaches the request URL to the Worker's log events, with your query 
    - `smoke` runs `scripts/served-artifact.ts` without the token. It passes once the landing page answers with the
      merged commit in `x-deploy-commit`, and `/wiki` serves the pinned server version and index. It starts no new
      attempt after 10 minutes.
+
+You can start the chain at step 2 by hand, from a checkout of this repository. gh runs it on `main`, and the
+`release-trigger` environment deploys only from `main`, so a run from another branch fails at its `bump` job:
+
+```bash
+gh workflow run bump.yml -f package=@tibia.sh/tibiawiki-mcp -f version=1.2.3
+```
+
+What can go wrong, and what to do:
+
+| What you see | What to do |
+|---|---|
+| Red CI on the bump pull request | The `bump` run ends red at the wait for the merge. Push the fix to the bump branch, and auto-merge merges it once the checks pass. Or close the pull request, fix the cause on `main`, and run `bump.yml` by hand. |
+| A bump pull request closed, or open past 30 minutes | The `bump` run is red. Fix the cause, then run `bump.yml` by hand. It reuses an open pull request and turns auto-merge on again, or opens a new one. |
+| A version still under a cooldown | The `pin` step fails at `pnpm add` when no version of some dependency is both in the range the release asks for and 7 days old, so the run is red before a pull request exists. Wait until one is, then run `bump.yml` by hand. |
+| A red `hosting` job in a release run | npm and the MCP registry are unaffected. The dispatch may still have arrived, so look for a `bump` run for that version in this repository's Actions tab, and run `bump.yml` by hand if there is none. A second run is harmless. It finds the version pinned, or the pull request open. |
 
 Nothing bumps the other dependencies for you. You bump `wrangler` and the other npm packages, the base image digest
 and the actions by hand in a pull request.
@@ -137,6 +166,47 @@ The token has no expiry, so it lasts until it is rotated or revoked. To rotate i
    for the token, so the token stays out of your shell history.
 3. Run `deploy.yml` on `main`, as in [Deploy](#deploy), and wait for `smoke` to pass.
 4. Revoke the old token.
+
+## The release trigger token
+
+`HOSTING_DISPATCH_TOKEN` is a fine-grained personal access token of the maintainer, with `tibia-sh` as its resource
+owner and `mcp.tibia.sh` as the only repository it can reach. It is a secret of the `release-trigger` environment
+in each of the three repositories, `mcp.tibia.sh`, `tibiawiki-mcp` and `tibiawiki-data`, and each of those
+environments deploys from `main` only. The `publish` step of `bump.yml` reads it here. The `hosting` job of each
+release workflow reads it there, to send the dispatch.
+
+The token holds these permissions on `mcp.tibia.sh`:
+
+| Permission | Access |
+|---|---|
+| Contents | Read and write |
+| Pull requests | Read and write |
+| Metadata | Read, which GitHub adds to every fine-grained token |
+
+The maintainer picks the token's lifetime when they create it. The organization's token policy caps a fine-grained
+token at 366 days by default, so the token expires within 366 days of its creation unless the maintainer raised that
+cap first and chose no expiry. The token's own page on GitHub shows its date. Once it expires, the `hosting` jobs and
+the `publish` step fail until you rotate it, so rotate before that date.
+
+The token means control of what the endpoint serves. The ruleset merges any pull request whose required checks
+pass, and those checks run the pull request's own scripts and tests, so a holder can push a branch whose checks
+pass by construction, open the pull request, turn on auto-merge, and land whatever `src/`, `Dockerfile`,
+`wrangler.jsonc` or lockfile they like on `main`. The merge deploys it, and a build command in `wrangler.jsonc` or a
+dependency standing in for wrangler would run in the deploy step next to the Cloudflare token. The token is the
+maintainer's own identity, so no rule can tell its pull requests from theirs. It cannot push to `main` directly,
+read a secret through the API, or touch the other two repositories, and without the Workflows permission it cannot
+change a workflow file. The maintainer accepted that trade-off.
+
+If this token leaks: revoke it, rotate the Cloudflare token as [The deploy token](#the-deploy-token) describes, and
+check what `main` holds and what the endpoint serves, with the `curl` in [Deploy](#deploy).
+
+To rotate it:
+
+1. Create a new token the same way: resource owner `tibia-sh`, repository access `mcp.tibia.sh` only, the
+   permissions above, and the lifetime you want.
+2. Run `gh secret set HOSTING_DISPATCH_TOKEN --env release-trigger --repo tibia-sh/<repo>` for `mcp.tibia.sh`,
+   `tibiawiki-mcp` and `tibiawiki-data`. Each prompts for the token, so it stays out of your shell history.
+3. Revoke the old token.
 
 ## Decommissioning
 
