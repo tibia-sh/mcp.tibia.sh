@@ -33,9 +33,10 @@ jobs:
           require-lockfile: true
       # Signatures are verified once per run, here. The other jobs install the same lockfile.
       - run: pnpm audit signatures
-      # pnpm applies the release age when it resolves a version. This judges every lockfile entry
-      # on every run, and verifies each first-party pin's provenance against its release workflow,
-      # which no pnpm setting does.
+      # pnpm applies the release age when it resolves a version, and checks the lockfile against it
+      # again when it installs, memoized per lockfile content in the record pnpm/setup restores. This
+      # judges every entry on every run, verifies each first-party pin's provenance against its
+      # release workflow, and holds each first-party package to one copy, which no pnpm setting does.
       - run: pnpm run check:lockfile
       - run: pnpm run typecheck
       - run: pnpm run test:unit

@@ -5,8 +5,9 @@
  *
  * It reads the project document of pnpm-lock.yaml and judges each registry package once, by name and version:
  * - A package outside @tibia.sh/ passes when the registry's publish time for its version is at least 7 days before
- *   now, the release age pnpm-workspace.yaml sets. pnpm applies that age when it resolves a version, not when it
- *   installs a lockfile, so CI checks the lockfile itself.
+ *   now, the release age pnpm-workspace.yaml sets. pnpm applies that age when it resolves a version and checks the
+ *   lockfile against it again when it installs, memoized per lockfile, and it never verifies provenance, so CI
+ *   judges the lockfile itself on every run.
  * - An @tibia.sh/ package skips that cooldown, so it passes only when first-party.ts registers its release
  *   workflow, the lockfile holds it at one version, the one package.json pins, its registry tarball has the
  *   integrity the lockfile records, the registry holds exactly one provenance attestation for it, and
