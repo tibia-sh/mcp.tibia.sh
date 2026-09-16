@@ -6,7 +6,7 @@
   "packageManager": "pnpm@12.4.1",
   "scripts": {
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.node.json",
-    "test:unit": "node --test test/policy.test.ts test/landing.test.ts test/wiring.test.ts test/check-lockfile.test.ts test/workflows.test.ts",
+    "test:unit": "node --test test/policy.test.ts test/landing.test.ts test/wiring.test.ts test/check-lockfile.test.ts test/bump.test.ts test/workflows.test.ts",
     "test:container": "node --test test/container.test.ts",
     "test:worker": "node --test test/worker.test.ts",
     "check:config": "node scripts/check-config.ts",
