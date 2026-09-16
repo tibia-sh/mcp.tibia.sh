@@ -3,7 +3,7 @@
  * fake git, gh and pnpm scripts on PATH.
  *
  * The fixtures copy the shapes the npm registry and gh 2.100.0 produced on 2026-09-15: a packument's `versions` and
- * `time` maps, the attestations response, what `gh pr list --json number --jq .[].number` and
+ * `time` maps, the attestations response, what `gh pr list --json number,isCrossRepository` and
  * `gh pr view --json state,autoMergeRequest` print. The fake registry rejects every URL it was not given, and the
  * fake runner records every command, so a rule that reads the wrong document or runs the wrong command fails its
  * test. The commands publish runs are what the token authorizes, so their tests compare the whole recorded list.
@@ -423,7 +423,7 @@ describe('publish', () => {
   const request = parseRequest(MCP, '0.6.1');
   const { branch, title } = request;
   const DIFF = ['git', 'diff', '--quiet', '--', 'package.json', 'pnpm-lock.yaml'];
-  const LIST = ['gh', 'pr', 'list', '--head', branch, '--state', 'open', '--json', 'number', '--jq', '.[].number'];
+  const LIST = ['gh', 'pr', 'list', '--head', branch, '--state', 'open', '--json', 'number,isCrossRepository'];
   const VIEW = ['gh', 'pr', 'view', branch, '--json', 'state,autoMergeRequest'];
   const MERGE = ['gh', 'pr', 'merge', '--auto', '--rebase', branch];
   /** What publish runs to open the pull request, in order, once no open one exists. */
@@ -454,21 +454,34 @@ describe('publish', () => {
   const MERGED = view('MERGED', false);
   const CLOSED = view('CLOSED', false);
 
-  type Fakes = { unchanged?: boolean; open?: number[]; views: string[]; fail?: { call: string[]; stderr: string } };
+  type Fakes = {
+    unchanged?: boolean;
+    open?: number[];
+    forks?: number[];
+    views: string[];
+    fail?: { call: string[]; stderr: string };
+  };
 
   /**
    * A fake git and gh for publish: git diff finds changes unless unchanged, gh pr list prints the given open pull
-   * requests, each gh pr view prints the next of views, the last one repeating, gh pr create keeps the body file's
+   * requests, forks being the ones from another repository, newest first as gh lists them, a higher number being
+   * newer, each gh pr view prints the next of views, the last one repeating, gh pr create keeps the body file's
    * content, since publish removes the file, and fail makes the command that starts with call exit 1 with stderr.
    */
   function fakeGitHub(fakes: Fakes) {
     const views = [...fakes.views];
     const created: { bodyFile?: string; body?: string } = {};
     const runner = fakeRun((call) => {
-      const { fail, open = [] } = fakes;
+      const { fail, open = [], forks = [] } = fakes;
       if (fail !== undefined && starts(call, ...fail.call)) return { status: 1, stderr: fail.stderr };
       if (starts(call, 'git', 'diff')) return { status: fakes.unchanged ? 0 : 1 };
-      if (starts(call, 'gh', 'pr', 'list')) return { stdout: open.map((number) => `${number}\n`).join('') };
+      if (starts(call, 'gh', 'pr', 'list')) {
+        const listed = [
+          ...forks.map((number) => ({ isCrossRepository: true, number })),
+          ...open.map((number) => ({ isCrossRepository: false, number })),
+        ].sort((a, b) => b.number - a.number);
+        return { stdout: `${JSON.stringify(listed)}\n` };
+      }
       if (starts(call, 'gh', 'pr', 'view')) return { stdout: `${views.length > 1 ? views.shift() : views[0]}\n` };
       if (starts(call, 'gh', 'pr', 'create')) {
         created.bodyFile = call.args[call.args.indexOf('--body-file') + 1];
@@ -530,6 +543,23 @@ describe('publish', () => {
     const { outcome, github } = publishing({ open: [11], views: [OPEN_OFF, MERGED] });
     assert.equal(await outcome, 'merged');
     assert.deepEqual(github.lines(), [DIFF, LIST, VIEW, MERGE, VIEW]);
+  });
+
+  test("a fork's open pull request from the branch does not count, and publish opens its own", async () => {
+    const { outcome, github } = publishing({ forks: [7], views: [OPEN_OFF, MERGED] });
+    assert.equal(await outcome, 'merged');
+    const { bodyFile, body } = github.created;
+    assert.equal(body, request.body);
+    assert.deepEqual(github.lines(), [DIFF, LIST, ...CREATE(bodyFile as string), VIEW, MERGE, VIEW]);
+  });
+
+  test("reuses the open pull request from this repository, with a fork's listed before or after it", async () => {
+    for (const forks of [[12], [7]]) {
+      const { outcome, github } = publishing({ open: [11], forks, views: [OPEN_ON, MERGED] });
+      assert.equal(await outcome, 'merged');
+      assert.deepEqual(github.lines(), [DIFF, LIST, VIEW, VIEW]);
+      assert.equal(github.created.body, undefined);
+    }
   });
 
   test('a pull request found closed fails the wait, naming it', async () => {
@@ -625,11 +655,26 @@ describe('publish', () => {
         message: new RegExp(`^gh pr view ${branch} --json state,autoMergeRequest printed ${quoted}, `),
       });
     }
-    const listed = fakeRun((call) => (starts(call, 'git', 'diff') ? { status: 1 } : { stdout: 'a pull request\n' }));
-    await assert.rejects(publish(request, { run: listed.run, ...fakeClock() }), {
-      message: /^gh pr list --head .* --jq \.\[\]\.number printed "a pull request\\n", /,
-    });
-    assert.deepEqual(listed.lines(), [DIFF, LIST]);
+    const lists = [
+      '',
+      'a pull request',
+      '11',
+      '{"isCrossRepository":false,"number":11}',
+      '[null]',
+      '[{"number":11}]',
+      '[{"isCrossRepository":false}]',
+      '[{"isCrossRepository":"false","number":11}]',
+      '[{"isCrossRepository":false,"number":"11"}]',
+      '[{"isCrossRepository":false,"number":11},{"isCrossRepository":null,"number":12}]',
+    ];
+    for (const printed of lists) {
+      const listed = fakeRun((call) => (starts(call, 'git', 'diff') ? { status: 1 } : { stdout: `${printed}\n` }));
+      const quoted = literal(JSON.stringify(`${printed}\n`));
+      await assert.rejects(publish(request, { run: listed.run, ...fakeClock() }), {
+        message: new RegExp(`^${literal(LIST.join(' '))} printed ${quoted}, `),
+      });
+      assert.deepEqual(listed.lines(), [DIFF, LIST]);
+    }
   });
 });
 
@@ -683,8 +728,8 @@ describe('the CLI', () => {
     await mkdir(empty);
     // The fakes log each call to FAKE_LOG, and their working directory to FAKE_CWD when that is set. git diff
     // exits FAKE_DIFF_STATUS, and says so on stdout, when that is set. gh records the GH_TOKEN it was given in
-    // FAKE_TOKEN_SEEN, gh pr list fails with FAKE_LIST_FAIL on stderr, and gh pr view prints FAKE_VIEW, when
-    // those are set. None of them touches the network or the repository.
+    // FAKE_TOKEN_SEEN, gh pr list fails with FAKE_LIST_FAIL on stderr and otherwise lists no pull request, and
+    // gh pr view prints FAKE_VIEW, when those are set. None of them touches the network or the repository.
     await writeFile(
       join(bin, 'git'),
       `#!/bin/sh
@@ -704,9 +749,12 @@ exit 0
 printf 'gh %s\\n' "$*" >> "$FAKE_LOG"
 [ -n "\${FAKE_CWD-}" ] && printf '%s\\n' "$PWD" >> "$FAKE_CWD"
 [ -n "\${FAKE_TOKEN_SEEN-}" ] && printf '%s\\n' "\${GH_TOKEN-unset}" > "$FAKE_TOKEN_SEEN"
-if [ "$1 $2" = "pr list" ] && [ -n "\${FAKE_LIST_FAIL-}" ]; then
-  printf '%s\\n' "$FAKE_LIST_FAIL" >&2
-  exit 1
+if [ "$1 $2" = "pr list" ]; then
+  if [ -n "\${FAKE_LIST_FAIL-}" ]; then
+    printf '%s\\n' "$FAKE_LIST_FAIL" >&2
+    exit 1
+  fi
+  printf '[]\\n'
 fi
 if [ "$1 $2" = "pr view" ] && [ -n "\${FAKE_VIEW-}" ]; then
   printf '%s\\n' "$FAKE_VIEW"
@@ -806,15 +854,18 @@ exit 0
     });
     assert.equal(result.status, 0);
     assert.equal(result.stderr, '');
-    const lines = result.stdout.split('\n');
-    assert.equal(lines[0], 'fake git: diff --quiet -- package.json pnpm-lock.yaml');
-    assert.equal(lines[1], 'https://github.com/tibia-sh/mcp.tibia.sh/pull/11');
-    assert.equal(lines[2], '{"autoMergeRequest":null,"state":"MERGED"}');
-    assert.equal(lines[3], 'bump: merged');
+    assert.deepEqual(result.stdout.split('\n'), [
+      'fake git: diff --quiet -- package.json pnpm-lock.yaml',
+      '[]',
+      'https://github.com/tibia-sh/mcp.tibia.sh/pull/11',
+      '{"autoMergeRequest":null,"state":"MERGED"}',
+      'bump: merged',
+      '',
+    ]);
     const logged = result.log().trimEnd().split('\n');
     assert.deepEqual(logged.slice(0, 7), [
       'git diff --quiet -- package.json pnpm-lock.yaml',
-      `gh pr list --head ${branch} --state open --json number --jq .[].number`,
+      `gh pr list --head ${branch} --state open --json number,isCrossRepository`,
       `git switch -c ${branch}`,
       'git add package.json pnpm-lock.yaml',
       'git -c user.name=github-actions[bot] -c user.email=41898282+github-actions[bot]@users.noreply.github.com ' +
@@ -831,7 +882,7 @@ exit 0
   test('a command that fails ends the CLI with its stderr, after showing it, and gh got the token unread', () => {
     const tokenSeen = join(scratch, 'token-seen');
     const complaint = 'gh: To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN environment variable.';
-    const list = 'gh pr list --head bump/tibiawiki-mcp-9.9.9 --state open --json number --jq .[].number';
+    const list = 'gh pr list --head bump/tibiawiki-mcp-9.9.9 --state open --json number,isCrossRepository';
     const result = cli(['publish', MCP, '9.9.9'], {
       FAKE_DIFF_STATUS: '1',
       FAKE_LIST_FAIL: complaint,
