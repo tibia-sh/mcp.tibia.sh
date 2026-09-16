@@ -31,7 +31,9 @@ non-public data.
 `https://mcp.tibia.sh/wiki/server-card` serves the endpoint's MCP Server Card, a JSON document that describes the
 server before you connect. It follows the experimental extension `io.modelcontextprotocol/server-card`, SEP-2127.
 The answer carries `Content-Type: application/mcp-server-card+json`, `Cache-Control: public, max-age=3600`, an
-`ETag` that is the deployed commit in double quotes, and the four CORS headers the extension requires. A `GET`
+`ETag` that is the deployed commit in double quotes, and the four CORS headers the extension requires:
+`Access-Control-Allow-Origin: *`, `Access-Control-Allow-Methods: GET`,
+`Access-Control-Allow-Headers: Content-Type, If-None-Match` and `Access-Control-Expose-Headers: ETag`. A `GET`
 with a matching `If-None-Match` gets `304`. The card's `$schema` is
 `https://static.modelcontextprotocol.io/schemas/v1/server-card.schema.json`, the identifier the extension's schema
 requires. That URL did not resolve when this was written. The `/.well-known/` paths some crawlers probe for a

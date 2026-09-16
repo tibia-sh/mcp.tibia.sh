@@ -123,16 +123,15 @@ export default {
  * The server card: one unit of the rate limit, then 304 when the request's If-None-Match names this deploy's
  * tag, otherwise the document, or its headers alone for a HEAD. The tag is the deploy commit in double quotes, a
  * strong validator, because the document depends on nothing but the bundled constants. Every answer carries the
- * card's CORS headers.
+ * card's CORS headers. The 304 carries the tag and Cache-Control but not the document's Content-Type, as RFC 9110
+ * section 15.4.5 asks: a 304 sends no representation, and only the headers that update a cached one.
  */
 async function serveCard(request: Request, env: Env): Promise<Response> {
   const ip = request.headers.get('cf-connecting-ip');
   if (!(await chargeClient((options) => env.RATE_LIMITER.limit(options), ip, 1))) return tooManyRequests(CARD_CORS);
   const etag = `"${env.DEPLOY_COMMIT}"`;
-  const headers = withCors(
-    new Headers({ 'Content-Type': SERVER_CARD_TYPE, 'Cache-Control': SERVER_CARD_CACHE_CONTROL, ETag: etag }),
-    CARD_CORS,
-  );
+  const headers = withCors(new Headers({ 'Cache-Control': SERVER_CARD_CACHE_CONTROL, ETag: etag }), CARD_CORS);
   if (notModified(request.headers.get('if-none-match'), etag)) return new Response(null, { status: 304, headers });
+  headers.set('Content-Type', SERVER_CARD_TYPE);
   return new Response(request.method === 'HEAD' ? null : SERVER_CARD, { headers });
 }
