@@ -197,10 +197,10 @@ own identity, so no rule can tell its pull requests from yours. It cannot push t
 through the API, or touch the other two repositories, and without the Workflows permission it cannot change a
 workflow file. The maintainer accepted that trade-off.
 
-If this token leaks, revoke it first. Then close every open pull request, your own included, until the revert
-below has merged, since one with auto-merge on merges without the token once its checks pass and deploys `main`
-as the holder left it, and cancel any run of `deploy.yml` still queued or in progress, since its `deploy` job reads
-the Cloudflare token when it starts. Then rotate the Cloudflare token, as
+If this token leaks, revoke it first. Then close every open pull request, your own included, and open none but
+the revert below until it has merged, since one with auto-merge on merges without the token once its checks pass
+and deploys `main` as the holder left it. Cancel any run of `deploy.yml` still queued or in progress, since its
+`deploy` job reads the Cloudflare token when it starts. Then rotate the Cloudflare token, as
 [The deploy token](#the-deploy-token) describes but without its deploy: create the new token, store it and revoke
 the old one. A deploy the holder landed may have read the old token, and while that token is valid its holder can
 deploy or delete at Cloudflare outside GitHub, so the rotation goes before the revert, which waits on checks, a
