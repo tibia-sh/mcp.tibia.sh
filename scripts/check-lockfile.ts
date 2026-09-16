@@ -1,46 +1,93 @@
 /**
- * The lockfile check: is every package the lockfile installs old enough, or first-party with provenance?
+ * The lockfile check: is every package pnpm-lock.yaml installs old enough, or first-party with verified provenance?
  *
  *   node scripts/check-lockfile.ts
  *
- * It reads package-lock.json and judges each registry package once, by name and version:
+ * It reads the project document of pnpm-lock.yaml and judges each registry package once, by name and version:
  * - A package outside @tibia.sh/ passes when the registry's publish time for its version is at least 7 days before
- *   now, the release age .npmrc sets.
- * - An @tibia.sh/ package skips that cooldown, so it passes only when its https://slsa.dev/provenance/v1 attestation
- *   names a workflow repository under https://github.com/tibia-sh/.
- * - An entry that does not resolve to the registry tarball of its own name and version fails, because neither rule
- *   can vouch for what npm would install from it.
+ *   now, the release age pnpm-workspace.yaml sets. pnpm applies that age when it resolves a version, not when it
+ *   installs a lockfile, so CI checks the lockfile itself.
+ * - An @tibia.sh/ package skips that cooldown, so it passes only when first-party.ts registers its release
+ *   workflow, the lockfile holds it at one version, the one package.json pins, its registry tarball has the
+ *   integrity the lockfile records, and `gh attestation verify` accepts the registry's provenance attestation for
+ *   that tarball as signed by that workflow on main, in a tibia-sh repository, on a GitHub-hosted runner.
+ * - An entry that is not a registry package of its own name and version fails, because neither rule can vouch for
+ *   what pnpm would install from it.
  *
- * `npm ci` installs a lockfile without applying min-release-age, and Dependabot's lockfile updates are not proven to
- * honour it, so CI checks the lockfile itself. This check reads what an attestation states. `npm audit signatures`,
- * which CI runs before it, verifies the attestations' signatures.
+ * pnpm-lock.yaml holds two YAML documents. The first records pnpm's own executable, the version package.json's
+ * packageManager field pins by hand, and this check skips it: the release age guards what the project resolves,
+ * and a package manager pinned by hand is not that. The second is the project's, and is what this check reads.
  *
- * The CLI prints one line per failure and exits 1 if there is any. Otherwise it prints one PASS line and exits 0.
+ * `pnpm audit signatures`, which CI runs before this check, verifies the registry's signature on every package.
+ * That proves the registry served the tarballs it published, not who built them. The provenance attestation names
+ * the workflow that built a first-party tarball, and this check has gh verify it against the workflow first-party.ts
+ * registers, so a first-party version published from anywhere else fails here.
+ *
+ * The CLI prints one line per failure and exits 1 if there is any. Otherwise it prints one PASS line, naming the
+ * first-party entries gh verified, and exits 0. It needs gh on PATH, and no gh login.
  */
-import { readFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { createWriteStream, readFileSync } from 'node:fs';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pipeline } from 'node:stream/promises';
+import { stripVTControlCharacters } from 'node:util';
+import { parseAllDocuments } from 'yaml';
+import packageJson from '../package.json' with { type: 'json' };
+import { FIRST_PARTY, FIRST_PARTY_SCOPE } from './first-party.ts';
 
 const REGISTRY = 'https://registry.npmjs.org/';
-const FIRST_PARTY_SCOPE = '@tibia.sh/';
-const FIRST_PARTY_REPOSITORIES = 'https://github.com/tibia-sh/';
 const PROVENANCE = 'https://slsa.dev/provenance/v1';
+/** The GitHub owner whose repositories may build a first-party package. */
+const OWNER = 'tibia-sh';
+/** The ref a first-party release workflow must have run on. */
+const SOURCE_REF = 'refs/heads/main';
 
-/** The release age a package outside @tibia.sh/ needs, as .npmrc's min-release-age=7. */
+/** The release age a package outside @tibia.sh/ needs, as pnpm-workspace.yaml's minimumReleaseAge of 10080 minutes. */
 const MIN_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-/** The most registry lookups in flight at once. */
+/** The most registry lookups in flight at once. A first-party lookup includes its download and its gh run. */
 const CONCURRENCY = 8;
 /** How long one lookup may take, its body included. */
 const FETCH_TIMEOUT_MS = 20_000;
+/** How long one tarball download may take. The data tarball was 5 MB on 2026-09-15. */
+const DOWNLOAD_TIMEOUT_MS = 60_000;
+/** How long one gh run may take. It fetches Sigstore's trust root, and verifies the bundle offline. */
+const GH_TIMEOUT_MS = 60_000;
 
 /**
  * A registry package name, scoped or not, and a semver version. Neither can hold a `/` beyond the scope's, or begin
- * with a dot, so neither can walk a registry URL over to another document.
+ * with a dot, so neither can walk a registry URL or a scratch path over to somewhere else.
  */
 const NAME = /^(?:@[a-z0-9~-][\w.~-]*\/)?[a-z0-9~-][\w.~-]*$/i;
 const VERSION = /^\d+\.\d+\.\d+(?:[-+][\w.+-]*)?$/;
+/** A sha512 integrity as the registry and pnpm write it: the digest's 64 bytes in base64. */
+const INTEGRITY = /^sha512-[A-Za-z0-9+/]{86}==$/;
 
-type FetchJson = (url: string) => Promise<unknown>;
+export type FetchJson = (url: string) => Promise<unknown>;
+/** Downloads url to file, and resolves with the sha512 integrity string of what it wrote. */
+export type Download = (url: string, file: string) => Promise<string>;
+/** Why gh rejected the tarball with the bundle, or undefined when it verified it. */
+export type Verify = (input: { tarball: string; bundle: string; workflow: string }) => Promise<string | undefined>;
 
-type Package = { name: string; version: string };
+/**
+ * What the check needs beside the lockfile: the registry, gh, a directory to keep tarballs and bundles in, and the
+ * versions package.json pins.
+ */
+export type Dependencies = {
+  fetchJson: FetchJson;
+  download: Download;
+  verify: Verify;
+  scratch: string;
+  pins: Record<string, string>;
+};
+
+/** The failures, one line each, and the first-party entries gh verified, both in lockfile order. */
+export type Verdict = { failures: string[]; verified: string[] };
+
+/** A registry package the lockfile installs: its `packages` key, and what the key and the entry hold. */
+type Package = { spec: string; name: string; version: string; integrity: string };
 
 /** The value of an own property of value, or undefined when value is not an object or has no such property. */
 function field(value: unknown, key: string): unknown {
@@ -49,31 +96,40 @@ function field(value: unknown, key: string): unknown {
     : undefined;
 }
 
+function isMapping(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 /**
- * The registry package a lockfile entry installs, or why it is not one. The name is the entry's `name` for an
- * aliased install, and otherwise the folder after the path's last node_modules/.
+ * The registry package a `packages` entry installs, or why it is not one. The key must be `<name>@<version>`, and
+ * the entry must resolve by a sha512 integrity alone, which is how pnpm records a package it fetched from the
+ * registry. A git, tarball or directory resolution carries other keys.
  */
-function registryPackage(path: string, entry: unknown): Package | string {
-  const at = path.lastIndexOf('node_modules/');
-  const name = field(entry, 'name') ?? (at === -1 ? undefined : path.slice(at + 'node_modules/'.length));
-  if (typeof name !== 'string' || !NAME.test(name)) return `${JSON.stringify(name ?? null)} is not a package name`;
-  const version = field(entry, 'version');
-  if (typeof version !== 'string' || !VERSION.test(version)) {
-    return `${JSON.stringify(version ?? null)} is not a package version`;
+function registryPackage(key: string, entry: unknown): Package | string {
+  const at = key.lastIndexOf('@');
+  const name = key.slice(0, at);
+  const version = key.slice(at + 1);
+  if (at < 1 || !NAME.test(name) || !VERSION.test(version)) return 'the key is not a package name and version';
+  const resolution = field(entry, 'resolution');
+  const integrity = field(resolution, 'integrity');
+  if (
+    !isMapping(resolution) ||
+    Object.keys(resolution).length !== 1 ||
+    typeof integrity !== 'string' ||
+    !INTEGRITY.test(integrity)
+  ) {
+    return `it resolves by ${JSON.stringify(resolution ?? null)}, not by a sha512 integrity alone`;
   }
-  const tarball = `${REGISTRY}${name}/-/${name.slice(name.lastIndexOf('/') + 1)}-${version}.tgz`;
-  const resolved = field(entry, 'resolved');
-  if (resolved !== tarball) return `it resolves to ${JSON.stringify(resolved ?? null)}, not ${tarball}`;
-  return { name, version };
+  return { spec: key, name, version, integrity };
 }
 
-function isFirstParty({ name }: Package): boolean {
-  return name.startsWith(FIRST_PARTY_SCOPE);
-}
-
-/** The registry document a package is judged by: its attestations when first-party, its packument otherwise. */
+/**
+ * The registry document a package is judged by: its attestations when first-party, its packument otherwise. The
+ * registry accepts a scope's slash as it is, and its own clients escape it.
+ */
 function lookupUrl(pkg: Package): string {
-  return isFirstParty(pkg) ? `${REGISTRY}-/npm/v1/attestations/${pkg.name}@${pkg.version}` : `${REGISTRY}${pkg.name}`;
+  const path = pkg.name.replace('/', '%2F');
+  return FIRST_PARTY.has(pkg.name) ? `${REGISTRY}-/npm/v1/attestations/${path}@${pkg.version}` : `${REGISTRY}${path}`;
 }
 
 /** Why a packument does not show version published at least MIN_AGE_MS before now, or undefined when it does. */
@@ -89,32 +145,62 @@ function releaseAgeFailure(packument: unknown, version: string, now: Date): stri
 }
 
 /**
- * Why an attestations response does not show provenance from a tibia-sh repository, or undefined when it does. It
- * needs a provenance attestation, and each one it holds must name such a repository.
+ * Why a first-party package fails before any lookup: it is under the scope with no registered release workflow,
+ * package.json does not pin it, the lockfile holds it at a second version, or its version is not the pin.
+ * Undefined for a package the release age judges, and for a registered one that is the single copy at its pin.
  */
-function provenanceFailure(response: unknown): string | undefined {
+function offlineFailure(pkg: Package, packages: Package[], pins: Record<string, string>): string | undefined {
+  if (!FIRST_PARTY.has(pkg.name)) {
+    return pkg.name.startsWith(FIRST_PARTY_SCOPE) ? 'no release workflow is registered for it' : undefined;
+  }
+  const pin = Object.hasOwn(pins, pkg.name) ? pins[pkg.name] : undefined;
+  if (pin === undefined) return 'package.json pins no such dependency';
+  const versions = packages.filter((other) => other.name === pkg.name).map((other) => other.version);
+  if (versions.length > 1) return `the lockfile holds it at ${versions.join(' and ')}, and package.json pins ${pin}`;
+  if (pkg.version !== pin) return `package.json pins ${pin}, not ${pkg.version}`;
+  return undefined;
+}
+
+/** The bundle of the one provenance attestation in an attestations response, or why there is not one. */
+function provenanceBundle(response: unknown): Record<string, unknown> | string {
   const attestations = field(response, 'attestations');
   const provenance = Array.isArray(attestations)
     ? attestations.filter((attestation) => field(attestation, 'predicateType') === PROVENANCE)
     : [];
   if (provenance.length === 0) return `the registry holds no ${PROVENANCE} attestation`;
-  for (const attestation of provenance) {
-    const payload = field(field(field(attestation, 'bundle'), 'dsseEnvelope'), 'payload');
-    let statement: unknown;
-    try {
-      if (typeof payload !== 'string') throw new TypeError('the payload is not a string');
-      statement = JSON.parse(Buffer.from(payload, 'base64').toString('utf8'));
-    } catch {
-      return 'the provenance attestation carries no base64 JSON statement';
-    }
-    const parameters = field(field(field(statement, 'predicate'), 'buildDefinition'), 'externalParameters');
-    const repository = field(field(parameters, 'workflow'), 'repository');
-    if (typeof repository !== 'string' || !repository.startsWith(FIRST_PARTY_REPOSITORIES)) {
-      const named = JSON.stringify(repository ?? null);
-      return `the provenance names repository ${named}, not one under ${FIRST_PARTY_REPOSITORIES}`;
-    }
+  if (provenance.length > 1) return `the registry holds ${provenance.length} ${PROVENANCE} attestations, not one`;
+  const bundle = field(provenance[0], 'bundle');
+  return isMapping(bundle) ? bundle : 'the provenance attestation carries no bundle';
+}
+
+/**
+ * Why the registry's provenance does not vouch for pkg's tarball, or undefined when gh verified it. The tarball is
+ * downloaded into deps.scratch and must have the lockfile's integrity, and gh must accept the attestation's bundle,
+ * written beside it, as workflow's signature over it. The files are named after the `packages` key, with the
+ * scope's slash escaped as the registry escapes it.
+ */
+async function provenanceFailure(
+  pkg: Package,
+  workflow: string,
+  response: unknown,
+  deps: Dependencies,
+): Promise<string | undefined> {
+  const bundle = provenanceBundle(response);
+  if (typeof bundle === 'string') return bundle;
+  const stem = join(deps.scratch, pkg.spec.replace('/', '%2F'));
+  const url = `${REGISTRY}${pkg.name}/-/${pkg.name.slice(pkg.name.lastIndexOf('/') + 1)}-${pkg.version}.tgz`;
+  let integrity: string;
+  try {
+    integrity = await deps.download(url, `${stem}.tgz`);
+  } catch (error) {
+    return `cannot download ${url}: ${errorText(error)}`;
   }
-  return undefined;
+  if (integrity !== pkg.integrity) {
+    return `the registry tarball has integrity ${integrity}, not the lockfile's ${pkg.integrity}`;
+  }
+  await writeFile(`${stem}.bundle.json`, JSON.stringify(bundle));
+  const reason = await deps.verify({ tarball: `${stem}.tgz`, bundle: `${stem}.bundle.json`, workflow });
+  return reason === undefined ? undefined : `gh attestation verify: ${reason}`;
 }
 
 /** An error's message, followed by its cause's, which is where fetch keeps the network error. */
@@ -137,48 +223,84 @@ async function forEachLimited<T>(items: T[], limit: number, work: (item: T) => P
 }
 
 /**
- * The failures of a parsed package-lock.json, one line each: `<name>@<version>: <reason>` for a registry package, and
- * `<install path>: <reason>` for an entry that is not one. The root entry is skipped. Each unique name@version is
- * judged once, and each registry document it needs is fetched once through fetchJson, at most CONCURRENCY at a time.
- * A failed fetch fails the packages judged by that document. It throws when lock has no `packages` object, or when
- * now is not a valid Date.
+ * The project document of pnpm-lock.yaml, parsed: the one document whose importer `.` has dependencies or
+ * devDependencies. The document that records the package manager has packageManagerDependencies there instead.
+ * It throws when the text is not valid YAML, or when there is not exactly one project document.
  */
-export async function checkLockfile(lock: unknown, fetchJson: FetchJson, now: Date): Promise<string[]> {
-  const entries = field(lock, 'packages');
-  if (typeof entries !== 'object' || entries === null || Array.isArray(entries)) {
-    throw new TypeError('the lockfile has no packages object, which lockfileVersion 2 and 3 have');
+export function projectDocument(lockfileText: string): unknown {
+  const projects: unknown[] = [];
+  for (const document of parseAllDocuments(lockfileText)) {
+    const problem = document.errors[0];
+    if (problem !== undefined) {
+      // The first line of the message, without the code frame yaml appends to it.
+      throw new Error(`the lockfile is not valid YAML: ${problem.message.replace(/\n[\s\S]*/, '')}`);
+    }
+    const parsed: unknown = document.toJS();
+    const importer = field(field(parsed, 'importers'), '.');
+    if (field(importer, 'dependencies') !== undefined || field(importer, 'devDependencies') !== undefined) {
+      projects.push(parsed);
+    }
   }
+  if (projects.length !== 1) {
+    throw new Error(
+      `the lockfile holds ${projects.length} documents whose importer . has dependencies or devDependencies, not one`,
+    );
+  }
+  return projects[0];
+}
+
+/**
+ * The verdict on a parsed project document: one failure line `<name>@<version>: <reason>` for a registry package,
+ * and `<packages key>: <reason>` for an entry that is not one. Each package is judged once. A first-party package
+ * that fails before any lookup gets none. Each registry document the rest need is fetched once through
+ * deps.fetchJson, at most CONCURRENCY lookups at a time, and a failed fetch fails the packages judged by that
+ * document. It throws when lock has no `packages` mapping, when now is not a valid Date, and when deps.verify
+ * rejects, which is how a gh that cannot run ends the check.
+ */
+export async function checkLockfile(lock: unknown, deps: Dependencies, now: Date): Promise<Verdict> {
+  const entries = field(lock, 'packages');
+  if (!isMapping(entries)) throw new TypeError('the lockfile document has no packages mapping');
   if (!(now instanceof Date) || Number.isNaN(now.getTime())) throw new TypeError('now is not a valid Date');
 
   const failures: string[] = [];
-  const packages = new Map<string, Package>();
-  for (const [path, entry] of Object.entries(entries)) {
-    if (path === '') continue;
-    const found = registryPackage(path, entry);
-    if (typeof found === 'string') failures.push(`${path}: ${found}`);
-    else packages.set(`${found.name}@${found.version}`, found);
+  const packages: Package[] = [];
+  for (const [key, entry] of Object.entries(entries)) {
+    const found = registryPackage(key, entry);
+    if (typeof found === 'string') failures.push(`${key}: ${found}`);
+    else packages.push(found);
   }
 
-  const judgedBy = Map.groupBy(packages, ([, pkg]) => lookupUrl(pkg));
   const reasons = new Map<string, string>();
+  for (const pkg of packages) {
+    const reason = offlineFailure(pkg, packages, deps.pins);
+    if (reason !== undefined) reasons.set(pkg.spec, reason);
+  }
+
+  const judgedBy = Map.groupBy(packages.filter((pkg) => !reasons.has(pkg.spec)), lookupUrl);
+  const verified = new Set<string>();
   await forEachLimited([...judgedBy], CONCURRENCY, async ([url, judged]) => {
     let body: unknown;
     try {
-      body = await fetchJson(url);
+      body = await deps.fetchJson(url);
     } catch (error) {
-      for (const [spec] of judged) reasons.set(spec, `cannot read ${url}: ${errorText(error)}`);
+      for (const pkg of judged) reasons.set(pkg.spec, `cannot read ${url}: ${errorText(error)}`);
       return;
     }
-    for (const [spec, pkg] of judged) {
-      const reason = isFirstParty(pkg) ? provenanceFailure(body) : releaseAgeFailure(body, pkg.version, now);
-      if (reason !== undefined) reasons.set(spec, reason);
+    for (const pkg of judged) {
+      const firstParty = FIRST_PARTY.get(pkg.name);
+      const reason =
+        firstParty === undefined
+          ? releaseAgeFailure(body, pkg.version, now)
+          : await provenanceFailure(pkg, firstParty.workflow, body, deps);
+      if (reason !== undefined) reasons.set(pkg.spec, reason);
+      else if (firstParty !== undefined) verified.add(pkg.spec);
     }
   });
-  for (const spec of packages.keys()) {
-    const reason = reasons.get(spec);
-    if (reason !== undefined) failures.push(`${spec}: ${reason}`);
+  for (const pkg of packages) {
+    const reason = reasons.get(pkg.spec);
+    if (reason !== undefined) failures.push(`${pkg.spec}: ${reason}`);
   }
-  return failures;
+  return { failures, verified: packages.filter((pkg) => verified.has(pkg.spec)).map((pkg) => pkg.spec) };
 }
 
 /** The JSON body of a GET on url, within FETCH_TIMEOUT_MS. It rejects on a status outside 200 to 299. */
@@ -197,25 +319,111 @@ async function fetchJson(url: string): Promise<unknown> {
   }
 }
 
+/**
+ * Streams a GET on url to file within DOWNLOAD_TIMEOUT_MS, and resolves with the sha512 integrity of what it
+ * wrote. It rejects on a status outside 200 to 299.
+ */
+export async function download(url: string, file: string): Promise<string> {
+  const signal = AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, { signal });
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Error(`HTTP ${response.status}`);
+    }
+    if (response.body === null) throw new Error('the response has no body');
+    const hash = createHash('sha512');
+    await pipeline(
+      response.body,
+      async function* (chunks: AsyncIterable<Uint8Array>) {
+        for await (const chunk of chunks) {
+          hash.update(chunk);
+          yield chunk;
+        }
+      },
+      createWriteStream(file),
+    );
+    return `sha512-${hash.digest('base64')}`;
+  } catch (error) {
+    if (signal.aborted) throw new Error(`no complete download within ${DOWNLOAD_TIMEOUT_MS / 1000} s`);
+    throw error;
+  }
+}
+
+/**
+ * A Verify that runs `gh attestation verify` as command, with the policy on its command line: the bundle must
+ * sign the tarball's sha512, from workflow in an OWNER repository at SOURCE_REF on a GitHub-hosted runner, as a
+ * PROVENANCE predicate. gh prints nothing on success and one Error line to stderr on failure, so a non-zero exit
+ * resolves with the last non-empty line of stderr, or the exit code when there is none. A run longer than
+ * timeoutMs is killed and resolves with that. It rejects when the command cannot start, as when gh is not on PATH.
+ */
+export function ghVerify(command = 'gh', timeoutMs = GH_TIMEOUT_MS): Verify {
+  return ({ tarball, bundle, workflow }) =>
+    new Promise((resolve, reject) => {
+      const args = [
+        'attestation', 'verify', tarball,
+        '--bundle', bundle,
+        '--digest-alg', 'sha512',
+        '--owner', OWNER,
+        '--signer-workflow', workflow,
+        '--source-ref', SOURCE_REF,
+        '--deny-self-hosted-runners',
+        '--predicate-type', PROVENANCE,
+      ];
+      const child = spawn(command, args, {
+        stdio: ['ignore', 'ignore', 'pipe'],
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      let stderr = '';
+      child.stderr.setEncoding('utf8').on('data', (chunk: string) => {
+        stderr += chunk;
+      });
+      child.on('error', (error: NodeJS.ErrnoException) => {
+        if (error.name === 'AbortError') resolve(`no verdict from gh within ${timeoutMs / 1000} s`);
+        else reject(new Error(`gh cannot start: ${error.code ?? error.message}`));
+      });
+      child.on('close', (code, signal) => {
+        if (code === 0) {
+          resolve(undefined);
+        } else if (code === null) {
+          resolve(`gh was killed by ${signal}`);
+        } else {
+          const lines = stripVTControlCharacters(stderr)
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter((line) => line !== '');
+          resolve(lines.at(-1) ?? `gh exited ${code}`);
+        }
+      });
+    });
+}
+
 async function main(): Promise<number> {
   const started = performance.now();
   let lookups = 0;
-  let failures: string[];
+  let verdict: Verdict;
+  const scratch = await mkdtemp(join(tmpdir(), 'check-lockfile-'));
   try {
-    const lock: unknown = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'));
+    const lock = projectDocument(readFileSync(new URL('../pnpm-lock.yaml', import.meta.url), 'utf8'));
     const counted: FetchJson = (url) => {
       lookups += 1;
       return fetchJson(url);
     };
-    failures = await checkLockfile(lock, counted, new Date());
+    const deps = { fetchJson: counted, download, verify: ghVerify(), scratch, pins: packageJson.dependencies };
+    verdict = await checkLockfile(lock, deps, new Date());
   } catch (error) {
     console.error(`check-lockfile: ${errorText(error)}`);
     return 1;
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
   }
-  for (const failure of failures) console.error(failure);
-  if (failures.length > 0) return 1;
+  for (const failure of verdict.failures) console.error(failure);
+  if (verdict.failures.length > 0) return 1;
   const seconds = ((performance.now() - started) / 1000).toFixed(1);
-  console.log(`check-lockfile: PASS, ${lookups} registry lookups in ${seconds} s`);
+  console.log(
+    `check-lockfile: PASS, ${lookups} registry lookups in ${seconds} s, ` +
+      `provenance verified for ${verdict.verified.join(', ')}`,
+  );
   return 0;
 }
 
