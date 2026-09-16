@@ -36,6 +36,15 @@ function settledOrPending<T>(promise: Promise<T>): Promise<T | typeof PENDING> {
 const BROWSER_ACCEPT = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8';
 const MCP_ACCEPT = 'application/json, text/event-stream';
 
+/** The CORS headers of every answer of the MCP endpoint but the landing page. */
+const ENDPOINT_CORS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': '*',
+  'Access-Control-Expose-Headers': 'Retry-After',
+  'Access-Control-Max-Age': '86400',
+};
+
 describe('route', () => {
   type RouteCase = [method: string, pathname: string, accept: string | null];
 
@@ -72,8 +81,19 @@ describe('route', () => {
   );
 
   routes(
-    'any other method on /wiki or /wiki/, a non-HTML GET included, is 405 with Allow: GET, POST',
-    { kind: 'reject', status: 405, allow: 'GET, POST' },
+    'OPTIONS on /wiki and /wiki/ is a preflight with the endpoint CORS headers',
+    { kind: 'preflight', cors: ENDPOINT_CORS },
+    [
+      ['OPTIONS', '/wiki', null],
+      ['OPTIONS', '/wiki/', null],
+      ['OPTIONS', '/wiki', BROWSER_ACCEPT],
+      ['OPTIONS', '/wiki/', MCP_ACCEPT],
+    ],
+  );
+
+  routes(
+    'any other method on /wiki or /wiki/, a non-HTML GET included, is 405 with Allow: GET, POST, OPTIONS and CORS',
+    { kind: 'reject', status: 405, allow: 'GET, POST, OPTIONS', cors: ENDPOINT_CORS },
     [
       ['GET', '/wiki', null],
       ['GET', '/wiki/', MCP_ACCEPT],
@@ -84,7 +104,6 @@ describe('route', () => {
       ['DELETE', '/wiki/', null],
       ['PUT', '/wiki', null],
       ['PATCH', '/wiki/', null],
-      ['OPTIONS', '/wiki', BROWSER_ACCEPT],
     ],
   );
 
@@ -94,6 +113,8 @@ describe('route', () => {
     ['HEAD', '/', '*/*'],
     ['POST', '/', MCP_ACCEPT],
     ['PUT', '/', BROWSER_ACCEPT],
+    ['OPTIONS', '/', null],
+    ['OPTIONS', '/other', null],
     ['GET', '/.well-known/oauth-protected-resource', 'application/json'],
     ['GET', '/.well-known/oauth-protected-resource/wiki', 'application/json'],
     ['GET', '/.well-known/oauth-authorization-server', 'application/json'],
@@ -105,7 +126,9 @@ describe('route', () => {
     ['POST', '/WIKI', MCP_ACCEPT],
     ['POST', '/Wiki/', MCP_ACCEPT],
     ['GET', '/WIKI', BROWSER_ACCEPT],
+    ['OPTIONS', '/WIKI', null],
     ['POST', '/wiki//', MCP_ACCEPT],
+    ['OPTIONS', '/wiki//', null],
     ['POST', '/wiki/mcp', MCP_ACCEPT],
     ['POST', '/wikis', MCP_ACCEPT],
     ['GET', '//', BROWSER_ACCEPT],
@@ -113,24 +136,15 @@ describe('route', () => {
 });
 
 describe('checkHeaders', () => {
-  const FORBIDDEN = { status: 403, body: 'Forbidden' };
   const PAYLOAD_TOO_LARGE = { status: 413, body: 'Payload Too Large' };
 
-  test('an Origin header is 403', () => {
-    assert.deepEqual(checkHeaders(new Headers({ origin: 'https://example.com' })), FORBIDDEN);
+  test('an Origin header passes', () => {
+    const headers = new Headers({ origin: 'https://example.com', 'content-type': 'application/json' });
+    assert.equal(checkHeaders(headers), null);
   });
 
-  test('an empty Origin header is 403', () => {
-    assert.deepEqual(checkHeaders(new Headers({ origin: '' })), FORBIDDEN);
-  });
-
-  test('no Origin header passes', () => {
-    assert.equal(checkHeaders(new Headers({ 'content-type': 'application/json' })), null);
-  });
-
-  test('Origin is checked before the declared length', () => {
-    const headers = new Headers({ origin: 'https://example.com', 'content-length': '65537' });
-    assert.deepEqual(checkHeaders(headers), FORBIDDEN);
+  test('an empty Origin header passes', () => {
+    assert.equal(checkHeaders(new Headers({ origin: '' })), null);
   });
 
   test('a declared length of 65,536 bytes passes', () => {
