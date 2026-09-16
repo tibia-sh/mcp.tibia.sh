@@ -107,7 +107,8 @@ pnpm applied the 7-day release age in `pnpm-workspace.yaml` when it wrote the lo
 7 days, and on any `@tibia.sh/*` entry without a provenance bundle that `gh attestation verify` accepts for the
 package's release workflow on `main`.
 
-A pull request that brings in a younger entry waits until the entry is 7 days old. Re-run `unit` then.
+A pull request that brings in a younger entry fails its checks until the entry is 7 days old: the `pnpm/setup`
+install fails in `unit`, `container` and `worker` alike. Re-run the failed checks then.
 
 ## The deploy token
 
