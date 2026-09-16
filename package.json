@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@tibia.sh/tibiawiki-data": "3.0.3",
-    "@tibia.sh/tibiawiki-mcp": "0.6.1"
+    "@tibia.sh/tibiawiki-mcp": "0.6.2"
   },
   "devDependencies": {
     "@cloudflare/containers": "0.3.7",
