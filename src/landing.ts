@@ -18,46 +18,52 @@ export function landingPage(): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light dark">
+<meta name="color-scheme" content="light">
 <meta name="description" content="A free MCP server that lets your AI assistant answer questions about Tibia from TibiaWiki. No account, nothing to install.">
 <title>Ask your AI about Tibia - mcp.tibia.sh</title>
 <style>
 :root {
-  --page: #eceef0; --ink: #18202b; --muted: #55606e; --link: #1d4e9e; --rule: #c9ced4; --field: #ffffff;
+  --night: #050b18; --sky: #24365f; --parchment: #fdf1dc; --row: #f1e0c6; --row-alt: #d4c0a1; --ink: #2b1b0b;
+  --brown: #5a2800; --link: #004294; --gold: #b9995a; --frame: #1c1407; --cream: #f5e7c3;
   --console: #0e1116; --say: #f2e266; --look: #5bdb6e; --npc: #86d9ee; --system: #9aa4ae;
 }
-@media (prefers-color-scheme: dark) {
-  :root { --page: #12161c; --ink: #e6e9ed; --muted: #9aa4ae; --link: #8fb8ff; --rule: #2c333d; --field: #0e1116; }
-}
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--page); color: var(--ink); font: 0.95rem/1.65 Verdana, Geneva, "DejaVu Sans", sans-serif; }
-main { max-width: 40rem; margin: 0 auto; padding: 3.5rem 1.25rem 2rem; }
-h1, h2 { font-family: Georgia, "Times New Roman", serif; font-weight: normal; line-height: 1.15; }
-h1 { font-size: clamp(2.1rem, 6vw, 3.1rem); letter-spacing: -0.01em; margin: 0 0 1rem; text-wrap: balance; }
-h2 { font-size: 1.5rem; margin: 3.25rem 0 0.75rem; }
+body { margin: 0; min-height: 100vh; color: var(--ink); font: 0.9rem/1.65 Verdana, Geneva, "DejaVu Sans", sans-serif;
+  background: var(--night) radial-gradient(ellipse 90rem 40rem at 50% -8rem, var(--sky) 0%, #0b1730 55%, var(--night) 100%) no-repeat; }
+header, main, footer { max-width: 44rem; margin: 0 auto; }
+header { padding: 3.5rem 1.25rem 2rem; color: var(--cream); }
+h1 { font: normal clamp(2.1rem, 6vw, 3.1rem)/1.15 Georgia, "Times New Roman", serif; letter-spacing: -0.01em; margin: 0 0 1rem; color: #f3d98b; text-shadow: 0 2px 0 #000; text-wrap: balance; }
+.lede { font-size: 1.05rem; max-width: 36rem; margin: 0; }
+main { background: var(--parchment); padding: 0 1.25rem 1.5rem; box-shadow: 0 0 0 2px var(--frame), 0 0 0 5px var(--gold), 0 0 0 7px var(--frame), 0 1.5rem 3rem #000; }
+h2, .headline { margin: 0 -1.25rem 1rem; padding: 0.4rem 1.25rem; color: var(--cream); border-top: 1px solid var(--gold); border-bottom: 1px solid var(--gold); text-shadow: 0 1px 0 #000; }
+h2 { font: small-caps normal 1.3rem/1.3 Georgia, "Times New Roman", serif; letter-spacing: 0.03em; margin-top: 2rem; background: linear-gradient(#3f6e2e, #1d4519); }
+.headline { font-size: 0.85rem; font-weight: bold; background: linear-gradient(#7a1418, #4d0a0d); }
+.headline span { font-weight: normal; font-size: 0.75rem; }
 p, ul, ol { margin: 0 0 1rem; }
 ul, ol { padding-left: 1.25rem; }
 li { margin-bottom: 0.35rem; }
-a { color: var(--link); text-underline-offset: 0.15em; }
+a { color: var(--link); font-weight: bold; text-underline-offset: 0.15em; }
 a:focus-visible, button:focus-visible, summary:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
-code, pre { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.9em; }
-pre { background: var(--field); border: 1px solid var(--rule); padding: 0.75rem 0.9rem; overflow-x: auto; margin: 0.5rem 0 1rem; }
-.lede { font-size: 1.1rem; max-width: 34rem; }
-.console { background: var(--console); color: var(--system); margin: 2rem 0 0.5rem; padding: 1rem 1.1rem; font-size: 0.85rem; line-height: 1.7; border: 2px solid #3b424c; box-shadow: inset 0 0 0 1px #000; }
+code, pre { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.95em; }
+pre { background: var(--row); border: 1px solid var(--row-alt); padding: 0.75rem 0.9rem; overflow-x: auto; margin: 0.5rem 0 0; }
+.console { background: var(--console); color: var(--system); margin: 0 0 0.5rem; padding: 1rem 1.1rem; font-size: 0.85rem; line-height: 1.7; border: 2px solid #3b424c; box-shadow: inset 0 0 0 1px #000; }
 .console p { margin: 0; }
 .console .say { color: var(--say); }
 .console .look { color: var(--look); }
 .console .npc { color: var(--npc); }
 .console .indent { padding-left: 2.9rem; }
-.note { color: var(--muted); font-size: 0.85rem; }
+.note { color: var(--brown); font-size: 0.8rem; }
 .address { display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 0.5rem 0 1.25rem; }
-.address code { flex: 1 1 16rem; background: var(--field); border: 1px solid var(--rule); padding: 0.6rem 0.8rem; font-size: 1rem; overflow-wrap: anywhere; }
-.address button { font: inherit; color: var(--page); background: var(--ink); border: 0; padding: 0.6rem 1rem; cursor: pointer; }
-details { border-top: 1px solid var(--rule); padding: 0.6rem 0; }
-details:last-of-type { border-bottom: 1px solid var(--rule); }
-summary { cursor: pointer; font-weight: bold; }
-details > *:not(summary) { margin-top: 0.6rem; }
-footer { max-width: 40rem; margin: 0 auto; padding: 1.5rem 1.25rem 3rem; border-top: 1px solid var(--rule); color: var(--muted); font-size: 0.85rem; }
+.address code { flex: 1 1 16rem; background: #fff; border: 1px solid var(--row-alt); padding: 0.6rem 0.8rem; font-size: 1rem; overflow-wrap: anywhere; }
+.address button { font: bold 0.9rem Verdana, Geneva, sans-serif; color: #ffd800; text-shadow: 0 1px 0 #000; background: linear-gradient(#2f62e0, #0a2a90); border: 2px solid var(--frame); box-shadow: 0 0 0 1px var(--gold); padding: 0.55rem 1rem; cursor: pointer; }
+.address button:hover { background: linear-gradient(#3d72f0, #12369f); }
+details { background: var(--row); padding: 0.55rem 0.75rem; border: 1px solid var(--row-alt); border-bottom: 0; }
+details:nth-of-type(even) { background: var(--row-alt); }
+details:last-of-type { border-bottom: 1px solid var(--row-alt); }
+summary { cursor: pointer; font-weight: bold; color: var(--brown); }
+details > *:not(summary) { margin-top: 0.6rem; margin-bottom: 0.25rem; }
+footer { padding: 1.75rem 1.25rem 3rem; color: #a9b3c6; font-size: 0.8rem; }
+footer a { color: #9fc0ff; font-weight: normal; }
 @media (prefers-reduced-motion: no-preference) {
   .console p { opacity: 0; animation: appear 0.25s ease-out forwards; }
   .console p:nth-child(1) { animation-delay: 0.3s; }
@@ -71,10 +77,12 @@ footer { max-width: 40rem; margin: 0 auto; padding: 1.5rem 1.25rem 3rem; border-
 </style>
 </head>
 <body>
-<main>
+<header>
 <h1>Ask your AI about Tibia</h1>
 <p class="lede">mcp.tibia.sh connects AI assistants to TibiaWiki. They stop guessing and look things up: drop rates, prices, creature weaknesses, quest rewards.</p>
-
+</header>
+<main>
+<p class="headline"><span>Sep 14 2026 -</span> What drops a dragon shield?</p>
 <div class="console" role="img" aria-label="An example. You ask what drops a dragon shield and how likely it is. The assistant asks TibiaWiki and answers: Eldritch Dragon Lord 25.93%, Grand Mother Foulscale 5%, Inkwing 2.61%, Dragolisk 0.61%, Dragon 0.30%. No NPC sells it and no quest rewards it.">
 <p class="say">14:02 You: What drops a dragon shield, and how likely is it?</p>
 <p>14:02 Your assistant asks TibiaWiki.</p>
