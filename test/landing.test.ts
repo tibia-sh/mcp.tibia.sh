@@ -54,7 +54,7 @@ test('it tells a visitor how to add the endpoint in claude.ai, Claude Code and C
 test('it loads nothing from another origin, so opening the page tells no third party', () => {
   const page = landingPage();
   // Links are fine, a visitor chooses to follow them. Anything the browser fetches by itself is not.
-  assert.deepEqual(page.match(/<(?:link|img|iframe|script|source|video|audio|object|embed)\b[^>]*\b(?:src|href|data)=/gi) ?? [], []);
-  assert.doesNotMatch(page, /@import|url\(/i);
+  assert.deepEqual(page.match(/<(?:link|img|iframe|script|source|video|audio|object|embed)\b[^>]*\b(?:src|srcset|poster|href|data)=/gi) ?? [], []);
+  assert.doesNotMatch(page, /@import|url\(|http-equiv/i);
 });
 
