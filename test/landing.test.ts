@@ -44,3 +44,17 @@ test("it quotes the first two sentences of the server's ATTRIBUTION", () => {
   assert.ok(sentences.length >= 2, `ATTRIBUTION has fewer than two sentences: ${JSON.stringify(ATTRIBUTION)}`);
   assertContains(sentences.slice(0, 2).join(' '));
 });
+
+test('it tells a visitor how to add the endpoint in claude.ai, Claude Code and Cursor', () => {
+  assertContains('Add custom connector');
+  assertContains('claude mcp add --transport http tibiawiki https://mcp.tibia.sh/wiki');
+  assertContains('"tibiawiki": { "url": "https://mcp.tibia.sh/wiki" }');
+});
+
+test('it loads nothing from another origin, so opening the page tells no third party', () => {
+  const page = landingPage();
+  // Links are fine, a visitor chooses to follow them. Anything the browser fetches by itself is not.
+  assert.deepEqual(page.match(/<(?:link|img|iframe|script|source|video|audio|object|embed)\b[^>]*\b(?:src|href|data)=/gi) ?? [], []);
+  assert.doesNotMatch(page, /@import|url\(/i);
+});
+
