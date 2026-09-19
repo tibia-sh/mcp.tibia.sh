@@ -83,11 +83,11 @@ footer a { color: #9fc0ff; font-weight: normal; }
 </header>
 <main>
 <p class="headline"><span>Sep 14 2026 -</span> What drops a dragon shield?</p>
-<div class="console" role="img" aria-label="An example. You ask what drops a dragon shield and how likely it is. The assistant asks TibiaWiki and answers: Eldritch Dragon Lord 25.93%, Grand Mother Foulscale 5%, Inkwing 2.61%, Dragolisk 0.61%, Dragon 0.30%. No NPC sells it and no quest rewards it.">
+<div class="console">
 <p class="say">14:02 You: What drops a dragon shield, and how likely is it?</p>
 <p>14:02 Your assistant asks TibiaWiki.</p>
 <p class="look">14:02 You see a dragon shield.</p>
-<p class="npc indent">It drops from Eldritch Dragon Lord (25.93%), Grand Mother Foulscale (5%), Inkwing (2.61%), Dragolisk (0.61%) and Dragon (0.30%).</p>
+<p class="npc indent">It drops most often from Eldritch Dragon Lord (25.93%), Grand Mother Foulscale (5%), Inkwing (2.61%), Dragolisk (0.61%) and Dragon (0.30%).</p>
 <p class="npc indent">No NPC sells it, and no quest rewards it.</p>
 <p class="indent">Source: tibia.fandom.com/wiki/Dragon_Shield</p>
 </div>
@@ -136,7 +136,7 @@ footer a { color: #9fc0ff; font-weight: normal; }
 <h2>Good to know</h2>
 <ul>
 <li>The answers come from a snapshot of TibiaWiki, refreshed when the wiki changes. It is not live game or server state, and every answer says when the snapshot was taken.</li>
-<li>You get about 300 requests a minute. That is plenty for a conversation.</li>
+<li>You get about 300 messages a minute, which is plenty for a conversation. If you use claude.ai, you share Anthropic's addresses with its other users, so you share one allowance with them.</li>
 <li>You can run the same server on your own machine, offline. <a href="https://github.com/tibia-sh/tibiawiki-mcp">github.com/tibia-sh/tibiawiki-mcp</a> shows how.</li>
 </ul>
 
@@ -155,6 +155,8 @@ footer a { color: #9fc0ff; font-weight: normal; }
 document.getElementById('copy').addEventListener('click', function (event) {
   navigator.clipboard.writeText(document.getElementById('address').textContent).then(function () {
     event.target.textContent = 'Copied';
+  }).catch(function () {
+    event.target.textContent = 'Select the address to copy it';
   });
 });
 </script>
