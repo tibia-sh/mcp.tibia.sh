@@ -20,7 +20,7 @@ export function landingPage(): string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <meta name="description" content="A free MCP server that lets your AI assistant answer questions about Tibia from TibiaWiki. No account, nothing to install.">
-<title>TibiaWiki for your AI assistant - mcp.tibia.sh</title>
+<title>Ask your AI about Tibia - mcp.tibia.sh</title>
 <style>
 :root {
   --page: #eceef0; --ink: #18202b; --muted: #55606e; --link: #1d4e9e; --rule: #c9ced4; --field: #ffffff;
@@ -33,7 +33,7 @@ export function landingPage(): string {
 body { margin: 0; background: var(--page); color: var(--ink); font: 0.95rem/1.65 Verdana, Geneva, "DejaVu Sans", sans-serif; }
 main { max-width: 40rem; margin: 0 auto; padding: 3.5rem 1.25rem 2rem; }
 h1, h2 { font-family: Georgia, "Times New Roman", serif; font-weight: normal; line-height: 1.15; }
-h1 { font-size: clamp(2.1rem, 6vw, 3.3rem); letter-spacing: -0.01em; margin: 0 0 1rem; }
+h1 { font-size: clamp(2.1rem, 6vw, 3.1rem); letter-spacing: -0.01em; margin: 0 0 1rem; text-wrap: balance; }
 h2 { font-size: 1.5rem; margin: 3.25rem 0 0.75rem; }
 p, ul, ol { margin: 0 0 1rem; }
 ul, ol { padding-left: 1.25rem; }
@@ -72,8 +72,8 @@ footer { max-width: 40rem; margin: 0 auto; padding: 1.5rem 1.25rem 3rem; border-
 </head>
 <body>
 <main>
-<h1>Ask your AI assistant about Tibia</h1>
-<p class="lede">mcp.tibia.sh connects Claude, Cursor and other AI assistants to TibiaWiki. They stop guessing and look things up: drop rates, prices, creature weaknesses, quest rewards.</p>
+<h1>Ask your AI about Tibia</h1>
+<p class="lede">mcp.tibia.sh connects AI assistants to TibiaWiki. They stop guessing and look things up: drop rates, prices, creature weaknesses, quest rewards.</p>
 
 <div class="console" role="img" aria-label="An example. You ask what drops a dragon shield and how likely it is. The assistant asks TibiaWiki and answers: Eldritch Dragon Lord 25.93%, Grand Mother Foulscale 5%, Inkwing 2.61%, Dragolisk 0.61%, Dragon 0.30%. No NPC sells it and no quest rewards it.">
 <p class="say">14:02 You: What drops a dragon shield, and how likely is it?</p>
