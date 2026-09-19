@@ -13,7 +13,7 @@
     "check:lockfile": "node scripts/check-lockfile.ts"
   },
   "dependencies": {
-    "@tibia.sh/tibiawiki-data": "3.0.3",
+    "@tibia.sh/tibiawiki-data": "3.0.4",
     "@tibia.sh/tibiawiki-mcp": "0.6.2"
   },
   "devDependencies": {
