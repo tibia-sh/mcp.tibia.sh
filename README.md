@@ -9,7 +9,7 @@ buy it, which creatures are weak to fire.
 Add `https://mcp.tibia.sh/wiki` to your MCP client as a remote MCP server. It needs no account and no key.
 [mcp.tibia.sh](https://mcp.tibia.sh) has the steps for claude.ai, Claude Code and other clients.
 
-It serves the same five tools as a local install of
+It serves the same tools as a local install of
 [`@tibia.sh/tibiawiki-mcp`](https://github.com/tibia-sh/tibiawiki-mcp), so you can also run it yourself.
 
 ## Limits

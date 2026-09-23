@@ -4,10 +4,10 @@
  *   node scripts/served-artifact.ts <url> [--wait-seconds <n>] [--expect-commit <sha>]
  *
  * Client 2.0.0 connects to the URL twice, once with default options (the 2025 era) and once with
- * versionNegotiation in auto mode (the 2026 era). Each era must list 5 tools, identify itself with the
- * pinned @tibia.sh/tibiawiki-mcp version, and answer tibia_search from the index in the pinned
- * @tibia.sh/tibiawiki-data. Both artifact checks are needed: a server-only bump leaves the index time
- * unchanged, and a data bump leaves the server version unchanged. No response may carry mcp-session-id,
+ * versionNegotiation in auto mode (the 2026 era). Each era must list the tools named in TOOL_NAMES of the
+ * pinned @tibia.sh/tibiawiki-mcp, identify itself with that pinned version, and answer tibia_search from the
+ * index in the pinned @tibia.sh/tibiawiki-data. Both artifact checks are needed: a server-only bump leaves the
+ * index time unchanged, and a data bump leaves the server version unchanged. No response may carry mcp-session-id,
  * because the server is stateless.
  *
  * The CLI makes one attempt, or with --wait-seconds repeats attempts 10 s apart and starts none after
@@ -18,18 +18,20 @@
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import type { ClientOptions } from '@modelcontextprotocol/client';
 import { DB_PATH } from '@tibia.sh/tibiawiki-data';
+import { TOOL_NAMES } from '@tibia.sh/tibiawiki-mcp/dist/server.js';
 import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
 import { parseArgs } from 'node:util';
 import packageJson from '../package.json' with { type: 'json' };
 
-export type ServedArtifact = { serverVersion: string; indexGeneratedAt: string };
+export type ServedArtifact = { serverVersion: string; indexGeneratedAt: string; toolNames: string[] };
 
 export type EraReport = {
   era: 'default' | 'auto';
   protocolVersion: string;
-  toolCount: number;
-  artifact: ServedArtifact;
+  /** The names tools/list served, sorted. */
+  toolNames: string[];
+  artifact: Omit<ServedArtifact, 'toolNames'>;
   responsesSeen: number;
   sessionIdsSeen: string[];
 };
@@ -45,9 +47,6 @@ const ERAS: ReadonlyArray<readonly [Era, ClientOptions]> = [
 /** The protocol version each era must negotiate. */
 const PROTOCOL_VERSIONS: Readonly<Record<Era, string>> = { default: '2025-11-25', auto: '2026-07-28' };
 
-/** The server's five tools. */
-const TOOL_COUNT = 5;
-
 /** How long one CLI attempt may take. */
 const ATTEMPT_MS = 60_000;
 /** The pause between the end of a failed attempt and the start of the next one. */
@@ -56,8 +55,9 @@ const ATTEMPT_INTERVAL_MS = 10_000;
 const USAGE = 'usage: node scripts/served-artifact.ts <url> [--wait-seconds <n>] [--expect-commit <sha>]';
 
 /**
- * What the endpoint must serve: the @tibia.sh/tibiawiki-mcp version pinned in package.json, and the
- * generate_time of the index in the installed @tibia.sh/tibiawiki-data, opened read-only.
+ * What the endpoint must serve: the @tibia.sh/tibiawiki-mcp version pinned in package.json and the TOOL_NAMES
+ * of the installed copy, and the generate_time of the index in the installed @tibia.sh/tibiawiki-data, opened
+ * read-only.
  */
 export function expectedArtifact(): ServedArtifact {
   const db = new DatabaseSync(DB_PATH, { readOnly: true });
@@ -65,7 +65,11 @@ export function expectedArtifact(): ServedArtifact {
     const row = db.prepare("SELECT value FROM database_info WHERE key = 'generate_time'").get();
     const generateTime = row?.['value'];
     if (typeof generateTime !== 'string') throw new Error(`${DB_PATH} holds no database_info.generate_time`);
-    return { serverVersion: packageJson.dependencies['@tibia.sh/tibiawiki-mcp'], indexGeneratedAt: generateTime };
+    return {
+      serverVersion: packageJson.dependencies['@tibia.sh/tibiawiki-mcp'],
+      indexGeneratedAt: generateTime,
+      toolNames: [...TOOL_NAMES],
+    };
   } finally {
     db.close();
   }
@@ -121,7 +125,7 @@ async function probeEra(url: URL, signal: AbortSignal, era: Era, options: Client
     return {
       era,
       protocolVersion,
-      toolCount: tools.length,
+      toolNames: tools.map((tool) => tool.name).sort(),
       artifact: { serverVersion, indexGeneratedAt },
       responsesSeen,
       sessionIdsSeen,
@@ -149,10 +153,14 @@ export async function probe(url: URL, signal: AbortSignal): Promise<EraReport[]>
 /** One line per failed condition, each naming its era. None when every report serves the expected artifact. */
 export function mismatches(reports: EraReport[], expected: ServedArtifact): string[] {
   const quote = (value: unknown) => JSON.stringify(value);
-  return reports.flatMap(({ era, protocolVersion, toolCount, artifact, responsesSeen, sessionIdsSeen }) => {
+  const expectedNames = new Set(expected.toolNames);
+  return reports.flatMap(({ era, protocolVersion, toolNames, artifact, responsesSeen, sessionIdsSeen }) => {
     const lines: string[] = [];
-    if (toolCount !== TOOL_COUNT) {
-      lines.push(`${era}: tools/list returned ${toolCount} tools, expected ${TOOL_COUNT}`);
+    const servedNames = new Set(toolNames);
+    const missing = expected.toolNames.filter((name) => !servedNames.has(name));
+    const extra = toolNames.filter((name) => !expectedNames.has(name));
+    if (missing.length > 0 || extra.length > 0) {
+      lines.push(`${era}: tools/list is missing ${quote(missing)} and serves extra ${quote(extra)}`);
     }
     if (responsesSeen === 0) {
       lines.push(`${era}: no HTTP response was observed, so the mcp-session-id check proves nothing`);
@@ -211,9 +219,9 @@ async function attempt(url: URL, expected: ServedArtifact, expectCommit: string 
     signal.aborted ? `no complete answer within ${ATTEMPT_MS / 1000} s: ${describe(error)}` : describe(error);
   try {
     for await (const report of probeEras(url, signal)) {
-      const { era, protocolVersion, toolCount, artifact, responsesSeen, sessionIdsSeen } = report;
+      const { era, protocolVersion, toolNames, artifact, responsesSeen, sessionIdsSeen } = report;
       observed.push(
-        `${era}: protocol ${JSON.stringify(protocolVersion)}, ${toolCount} tools, ` +
+        `${era}: protocol ${JSON.stringify(protocolVersion)}, ${toolNames.length} tools, ` +
           `serverInfo.version ${JSON.stringify(artifact.serverVersion)}, ` +
           `indexGeneratedAt ${JSON.stringify(artifact.indexGeneratedAt)}, ` +
           `${responsesSeen} responses, mcp-session-id ${JSON.stringify(sessionIdsSeen)}`,
