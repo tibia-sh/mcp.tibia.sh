@@ -10,6 +10,11 @@ minimumReleaseAgeStrict: true
 # verifies each pin's provenance against that workflow on every CI run.
 minimumReleaseAgeExclude:
   - '@tibia.sh/*'
+  # pnpm itself skips the cooldown too, by the maintainer's decision of 2026-09-24: the repo
+  # takes each pnpm release when it comes out. packageManager pins the exact version and the
+  # lockfile holds its integrity, so the exclude only matters when that pin is moved on purpose.
+  - pnpm
+  - '@pnpm/exe.*'
 trustPolicy: no-downgrade
 blockExoticSubdeps: true
 strictDepBuilds: true

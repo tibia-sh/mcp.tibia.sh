@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "license": "MIT",
-  "packageManager": "pnpm@12.4.1",
+  "packageManager": "pnpm@12.6.0",
   "scripts": {
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.node.json",
     "test:unit": "node --test test/policy.test.ts test/server-card.test.ts test/landing.test.ts test/wiring.test.ts test/registry.test.ts test/check-lockfile.test.ts test/bump.test.ts test/workflows.test.ts test/served-artifact.test.ts",
