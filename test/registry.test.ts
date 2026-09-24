@@ -1,6 +1,6 @@
 /**
  * The registry client the lockfile check and the bump script share: the URLs it builds, the provenance entries it
- * picks out of an attestations document, and its bounded fetch, against a loopback server.
+ * picks out of an attestations document, and its bounded fetches, against a loopback server.
  */
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -10,6 +10,7 @@ import {
   attestationsUrl,
   errorText,
   fetchJson,
+  fetchStatus,
   packumentUrl,
   provenanceAttestations,
   PROVENANCE,
@@ -51,12 +52,20 @@ describe('the provenance attestations', () => {
 });
 
 describe('the bounded fetch', () => {
-  /** Serves /ok.json as JSON, /slow.json after a pause longer than any bound the tests use, and 404 otherwise. */
-  async function serve(work: (origin: string) => Promise<void>): Promise<void> {
+  /**
+   * Serves /ok.json as JSON, /moved.tgz as a redirect to /ok.json, /slow.json after a pause longer than any bound
+   * the tests use, and 404 otherwise, and records the method of each request.
+   */
+  async function serve(work: (origin: string, methods: string[]) => Promise<void>): Promise<void> {
+    const methods: string[] = [];
     const server = createServer((request, response) => {
+      methods.push(request.method ?? '');
       if (request.url === '/ok.json') {
         response.writeHead(200, { 'content-type': 'application/json' });
         response.end('{"name":"left-pad","versions":{"1.3.0":{}}}');
+      } else if (request.url === '/moved.tgz') {
+        response.writeHead(302, { location: '/ok.json' });
+        response.end();
       } else if (request.url === '/slow.json') {
         setTimeout(() => response.end('{}'), 2000).unref();
       } else {
@@ -67,7 +76,7 @@ describe('the bounded fetch', () => {
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const { port } = server.address() as AddressInfo;
     try {
-      await work(`http://127.0.0.1:${port}`);
+      await work(`http://127.0.0.1:${port}`, methods);
     } finally {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -82,14 +91,26 @@ describe('the bounded fetch', () => {
     });
   });
 
+  test('the status fetch asks with HEAD, follows a redirect, takes any status, and rejects on the bound', async () => {
+    await serve(async (origin, methods) => {
+      assert.equal(await fetchStatus(`${origin}/ok.json`, 5000), 200);
+      assert.equal(await fetchStatus(`${origin}/missing.tgz`, 5000), 404);
+      assert.equal(await fetchStatus(`${origin}/moved.tgz`, 5000), 200);
+      await assert.rejects(fetchStatus(`${origin}/slow.json`, 100), { message: 'no answer within 0.1 s' });
+      assert.deepEqual(methods, ['HEAD', 'HEAD', 'HEAD', 'HEAD', 'HEAD']);
+    });
+  });
+
   test('a connection that fails rejects with the network error as its text', async () => {
     const server = createServer();
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const { port } = server.address() as AddressInfo;
     await new Promise<void>((resolve) => server.close(() => resolve()));
-    await assert.rejects(fetchJson(`http://127.0.0.1:${port}/ok.json`, 5000), (error: unknown) => {
-      assert.match(errorText(error), /^fetch failed: .*ECONNREFUSED/);
-      return true;
-    });
+    for (const fetching of [fetchJson, fetchStatus]) {
+      await assert.rejects(fetching(`http://127.0.0.1:${port}/ok.json`, 5000), (error: unknown) => {
+        assert.match(errorText(error), /^fetch failed: .*ECONNREFUSED/);
+        return true;
+      });
+    }
   });
 });
