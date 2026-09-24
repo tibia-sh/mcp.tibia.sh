@@ -419,15 +419,15 @@ test('deploy.yml runs in the concurrency group deploy, which never cancels a run
   });
 });
 
-test("bump.yml's one job is bump, in release-trigger, bounded at 45 minutes, with the payload in its env", () => {
+test("bump.yml's one job is bump, in release-trigger, bounded at 60 minutes, with the payload in its env", () => {
   const jobs = jobsOf('bump.yml', workflow('bump.yml'));
   assert.deepEqual(Object.keys(jobs), ['bump']);
   const { bump } = jobs;
   assert.ok(bump, 'bump.yml has no bump job');
   // The environment holds the token and deploys from main only. The bound backs the two waits of the scripts, of
-  // 10 and 30 minutes, and the install.
+  // 15 and 30 minutes, and the install.
   assert.equal(bump['environment'], 'release-trigger');
-  assert.equal(bump['timeout-minutes'], 45);
+  assert.equal(bump['timeout-minutes'], 60);
   // On a workflow_dispatch the inputs, otherwise the client_payload of the repository_dispatch, and nothing else.
   assert.deepEqual(bump['env'], {
     PACKAGE: "${{ github.event_name == 'workflow_dispatch' && inputs.package || github.event.client_payload.package }}",
