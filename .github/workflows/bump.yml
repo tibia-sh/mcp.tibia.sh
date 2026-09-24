@@ -30,7 +30,9 @@ concurrency: { group: bump, cancel-in-progress: false, queue: max }
 jobs:
   bump:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # pin waits up to 15 minutes for npm and publish up to 30 for the merge, which leaves 15 for the
+    # setup, pnpm add and the lockfile check.
+    timeout-minutes: 60
     environment: release-trigger
     # The payload is untrusted. It reaches the scripts as arguments read from these two variables, never
     # as text of a command line, and the scripts refuse anything but a first-party package and an exact
