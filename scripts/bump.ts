@@ -9,9 +9,10 @@
  *
  * `pin` reads the pin in package.json. The same version ends it with `bump: already-pinned`. A lower one fails it,
  * since a release never moves the endpoint back. A newer one waits until npm serves the version with a publish
- * time and a provenance attestation, polling every 15 seconds for 10 minutes, then runs
+ * time, a provenance attestation and a tarball that answers 200, polling every 15 seconds for 15 minutes, then runs
  * `pnpm add --save-exact <package>@<version>` and `node scripts/check-lockfile.ts`, so a version whose provenance
- * does not verify never reaches a pull request. It needs no credentials.
+ * does not verify never reaches a pull request. npm lists a fresh version before its CDN serves the tarball, which
+ * answered 404 for five minutes after 0.8.0 was published, and pnpm add fails on that 404. It needs no credentials.
  *
  * `publish` ends with `bump: nothing-to-publish` when package.json and pnpm-lock.yaml are unchanged. Otherwise it
  * reuses the open pull request from bump/<name>-<version>, or creates that branch, commits the two files as
@@ -38,13 +39,15 @@ import {
   attestationsUrl,
   errorText,
   fetchJson,
+  fetchStatus,
   field,
   isMapping,
   packumentUrl,
   provenanceAttestations,
   PROVENANCE,
+  REGISTRY,
 } from './registry.ts';
-import type { FetchJson } from './registry.ts';
+import type { FetchJson, FetchStatus } from './registry.ts';
 
 /** The repository root, which every command runs in, wherever the script was started from. */
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -54,7 +57,7 @@ const VERSION = /^[0-9]+\.[0-9]+\.[0-9]+$/;
 
 /** How often npm is asked for the version, and for how long since the first try. */
 const NPM_POLL_MS = 15_000;
-const NPM_DEADLINE_MS = 10 * 60_000;
+const NPM_DEADLINE_MS = 15 * 60_000;
 /** How long one registry request may take. */
 const FETCH_TIMEOUT_MS = 10_000;
 /** How long one git or gh command may take. */
@@ -144,13 +147,21 @@ async function pauseBefore(deadline: number, interval: number, clock: Clock): Pr
   return clock.now() <= deadline;
 }
 
-/** Why a packument does not list version with a publish time, or undefined when it does. */
-function packumentLacks(packument: unknown, version: string): string | undefined {
-  if (field(field(packument, 'versions'), version) === undefined) return `the packument lists no ${version}`;
+/**
+ * The tarball a packument lists for version under `dist`, which pnpm add downloads, or why the packument does not
+ * list the version with a publish time and a tarball on REGISTRY.
+ */
+function listedTarball(packument: unknown, version: string): { tarball: string } | string {
+  const listed = field(field(packument, 'versions'), version);
+  if (listed === undefined) return `the packument lists no ${version}`;
   if (field(field(packument, 'time'), version) === undefined) {
     return `the packument records no publish time for ${version}`;
   }
-  return undefined;
+  const tarball = field(field(listed, 'dist'), 'tarball');
+  if (typeof tarball !== 'string' || !tarball.startsWith(REGISTRY)) {
+    return `the packument names no ${REGISTRY} tarball for ${version}`;
+  }
+  return { tarball };
 }
 
 /** Why an attestations response holds no provenance attestation, or undefined when it holds at least one. */
@@ -159,14 +170,14 @@ function attestationsLack(response: unknown): string | undefined {
 }
 
 /**
- * What the document at url lacks by judge, or undefined when nothing. A fetch that fails, which includes one that
- * timed out, is a document that lacks everything, since npm may not be serving the release yet.
+ * What judge makes of the document at url, a string being what the document lacks. A fetch that fails, which
+ * includes one that timed out, is a document that lacks everything, since npm may not be serving the release yet.
  */
-async function lacks(
+async function examine<T>(
   fetchJson: FetchJson,
   url: string,
-  judge: (body: unknown) => string | undefined,
-): Promise<string | undefined> {
+  judge: (body: unknown) => T | string,
+): Promise<T | string> {
   let body: unknown;
   try {
     body = await fetchJson(url);
@@ -176,28 +187,48 @@ async function lacks(
   return judge(body);
 }
 
+/** Why the tarball at url cannot be downloaded yet, or undefined when a HEAD on it answers 200. */
+async function tarballLacks(fetchStatus: FetchStatus, url: string): Promise<string | undefined> {
+  let status: number;
+  try {
+    status = await fetchStatus(url);
+  } catch (error) {
+    return `cannot read ${url}: ${errorText(error)}`;
+  }
+  return status === 200 ? undefined : `the tarball ${url} answers HTTP ${status}`;
+}
+
 /**
- * Resolves once npm serves the request's version: its packument lists the version with a publish time, and its
- * attestations document holds a provenance attestation. It tries every NPM_POLL_MS, the packument until that is
- * there and the attestations from then on, and no try starts later than NPM_DEADLINE_MS after the first: once the
- * next one would, it rejects naming what npm still lacks.
+ * Resolves once npm serves the request's version: its packument lists the version with a publish time and a tarball,
+ * its attestations document holds a provenance attestation, and a HEAD on the tarball answers 200. It tries every
+ * NPM_POLL_MS, each document until it is there and the next one from then on, and no try starts later than
+ * NPM_DEADLINE_MS after the first: once the next one would, it rejects naming what npm still lacks.
  */
-export async function waitForNpm(request: Request, deps: { fetchJson: FetchJson } & Clock): Promise<void> {
+export async function waitForNpm(
+  request: Request,
+  deps: { fetchJson: FetchJson; fetchStatus: FetchStatus } & Clock,
+): Promise<void> {
   const packument = packumentUrl(request.name);
   const attestations = attestationsUrl(request.name, request.version);
   const deadline = deps.now() + NPM_DEADLINE_MS;
-  let published = false;
+  let tarball: string | undefined;
+  let attested = false;
   for (;;) {
     let reason: string | undefined;
-    if (!published) {
-      reason = await lacks(deps.fetchJson, packument, (body) => packumentLacks(body, request.version));
-      published = reason === undefined;
+    if (tarball === undefined) {
+      const listed = await examine(deps.fetchJson, packument, (body) => listedTarball(body, request.version));
+      if (typeof listed === 'string') reason = listed;
+      else tarball = listed.tarball;
     }
-    if (published) reason = await lacks(deps.fetchJson, attestations, attestationsLack);
+    if (tarball !== undefined && !attested) {
+      reason = await examine(deps.fetchJson, attestations, attestationsLack);
+      attested = reason === undefined;
+    }
+    if (tarball !== undefined && attested) reason = await tarballLacks(deps.fetchStatus, tarball);
     if (reason === undefined) return;
     if (!(await pauseBefore(deadline, NPM_POLL_MS, deps))) {
       throw new Error(
-        `npm does not serve ${request.name}@${request.version} with provenance ` +
+        `npm does not serve ${request.name}@${request.version} with provenance and a downloadable tarball ` +
           `${NPM_DEADLINE_MS / 60_000} minutes after the first try: ${reason}`,
       );
     }
@@ -225,13 +256,14 @@ function bounded(run: Run, timeoutMs: number): Run {
 
 /**
  * Pins the request's version. The pinned version resolves already-pinned without a lookup. An older one throws,
- * since the trigger never downgrades. A newer one waits for npm, runs pnpm add, which pins it and refreshes the
- * lockfile, then the lockfile check on the result, and resolves pinned. A command that does not exit 0 throws
- * with its stderr, so a version whose provenance does not verify never reaches a pull request.
+ * since the trigger never downgrades. A newer one waits for npm to serve it, its tarball included, runs pnpm add,
+ * which pins it and refreshes the lockfile, then the lockfile check on the result, and resolves pinned. A command
+ * that does not exit 0 throws with its stderr, so a version whose provenance does not verify never reaches a pull
+ * request.
  */
 export async function pin(
   request: Request,
-  deps: { readPackageJson: () => unknown; fetchJson: FetchJson; run: Run } & Clock,
+  deps: { readPackageJson: () => unknown; fetchJson: FetchJson; fetchStatus: FetchStatus; run: Run } & Clock,
 ): Promise<'pinned' | 'already-pinned'> {
   const packageJson = deps.readPackageJson();
   const comparison = compareWithPin(request, packageJson);
@@ -444,7 +476,13 @@ async function main(args: string[]): Promise<number> {
     const clock: Clock = { sleep: (ms) => delay(ms), now: Date.now };
     const outcome =
       action === 'pin'
-        ? await pin(request, { readPackageJson, fetchJson: (url) => fetchJson(url, FETCH_TIMEOUT_MS), run, ...clock })
+        ? await pin(request, {
+            readPackageJson,
+            fetchJson: (url) => fetchJson(url, FETCH_TIMEOUT_MS),
+            fetchStatus: (url) => fetchStatus(url, FETCH_TIMEOUT_MS),
+            run,
+            ...clock,
+          })
         : await publish(request, { run, ...clock });
     console.log(`bump: ${outcome}`);
     return 0;

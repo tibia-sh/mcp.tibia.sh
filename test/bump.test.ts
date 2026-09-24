@@ -44,12 +44,19 @@ function attestationsUrl(name: string, version: string): string {
   return `https://registry.npmjs.org/-/npm/v1/attestations/${name.replace('/', '%2F')}@${version}`;
 }
 
-/** A packument listing the given versions, each with a publish time unless timed is false. */
+/** The tarball URL the registry lists for name@version under `dist`: the scope in the path, not in the file name. */
+function tarballUrl(name: string, version: string): string {
+  return `https://registry.npmjs.org/${name}/-/${name.slice(name.lastIndexOf('/') + 1)}-${version}.tgz`;
+}
+
+/** A packument listing the given versions, each with its tarball, and a publish time unless timed is false. */
 function packument(name: string, versions: string[], timed = true): unknown {
   return {
     name,
     'dist-tags': { latest: versions.at(-1) },
-    versions: Object.fromEntries(versions.map((version) => [version, { name, version }])),
+    versions: Object.fromEntries(
+      versions.map((version) => [version, { name, version, dist: { tarball: tarballUrl(name, version) } }]),
+    ),
     time: {
       created: '2020-01-01T00:00:00.000Z',
       ...(timed ? Object.fromEntries(versions.map((version) => [version, '2026-09-15T10:00:00.000Z'])) : {}),
@@ -69,22 +76,28 @@ function attestations(provenance = true): unknown {
 }
 
 /**
- * A fake fetchJson that answers each URL from its queue of bodies, in order, the last one repeating, an Error body
- * being a failed fetch. It rejects every other URL, answers on a later turn of the event loop, and records the URLs.
+ * A fake registry whose fetchJson and fetchStatus answer each URL from its queue, in order, the last one repeating,
+ * an Error being a failed fetch: a body for fetchJson, an HTTP status for fetchStatus. Both reject every other URL,
+ * answer on a later turn of the event loop, and record the URLs in one list.
  */
 function fakeRegistry(queues: Record<string, unknown[]>) {
   const requests: string[] = [];
   const remaining = structuredClone(queues);
-  const fetchJson = async (url: string): Promise<unknown> => {
+  const answer = async (url: string): Promise<unknown> => {
     requests.push(url);
     await setImmediate();
     const queue = remaining[url];
     if (queue === undefined || queue.length === 0) throw new Error(`the fake registry has no ${url}`);
-    const body = queue.length > 1 ? queue.shift() : queue[0];
-    if (body instanceof Error) throw body;
-    return structuredClone(body);
+    const next = queue.length > 1 ? queue.shift() : queue[0];
+    if (next instanceof Error) throw next;
+    return structuredClone(next);
   };
-  return { fetchJson, requests };
+  const fetchStatus = async (url: string): Promise<number> => {
+    const status = await answer(url);
+    if (typeof status !== 'number') throw new Error(`the fake registry answers ${url} with a body, not a status`);
+    return status;
+  };
+  return { fetchJson: answer, fetchStatus, requests };
 }
 
 /** A fake clock that only moves when something sleeps on it, or a fake advances it, and records each sleep. */
@@ -219,8 +232,9 @@ describe('waitForNpm', () => {
   const request = parseRequest(MCP, '0.6.1');
   const PACKUMENT = packumentUrl(MCP);
   const ATTESTATIONS = attestationsUrl(MCP, '0.6.1');
-  /** The tries the wait makes at 15 s apart in 10 min, the first at once and the last at the deadline. */
-  const TRIES = 41;
+  const TARBALL = tarballUrl(MCP, '0.6.1');
+  /** The tries the wait makes at 15 s apart in 15 min, the first at once and the last at the deadline. */
+  const TRIES = 61;
   const OLD = packument(MCP, ['0.6.0']);
   const NEW = packument(MCP, ['0.6.0', '0.6.1']);
   const UNTIMED = packument(MCP, ['0.6.0', '0.6.1'], false);
@@ -229,13 +243,14 @@ describe('waitForNpm', () => {
   function wait(queues: Record<string, unknown[]>) {
     const registry = fakeRegistry(queues);
     const clock = fakeClock();
-    return { done: waitForNpm(request, { fetchJson: registry.fetchJson, ...clock }), registry, clock };
+    const deps = { fetchJson: registry.fetchJson, fetchStatus: registry.fetchStatus, ...clock };
+    return { done: waitForNpm(request, deps), registry, clock };
   }
 
-  test('resolves at once when npm lists the version with a publish time and holds its provenance', async () => {
-    const { done, registry, clock } = wait({ [PACKUMENT]: [NEW], [ATTESTATIONS]: [attestations()] });
+  test('resolves at once when npm lists the version, holds its provenance and serves its tarball', async () => {
+    const { done, registry, clock } = wait({ [PACKUMENT]: [NEW], [ATTESTATIONS]: [attestations()], [TARBALL]: [200] });
     await done;
-    assert.deepEqual(registry.requests, [PACKUMENT, ATTESTATIONS]);
+    assert.deepEqual(registry.requests, [PACKUMENT, ATTESTATIONS, TARBALL]);
     assert.deepEqual(clock.sleeps, []);
   });
 
@@ -243,34 +258,65 @@ describe('waitForNpm', () => {
     const { done, registry, clock } = wait({
       [PACKUMENT]: [OLD, UNTIMED, NEW],
       [ATTESTATIONS]: [attestations(false), attestations()],
+      [TARBALL]: [200],
     });
     await done;
-    assert.deepEqual(registry.requests, [PACKUMENT, PACKUMENT, PACKUMENT, ATTESTATIONS, ATTESTATIONS]);
+    assert.deepEqual(registry.requests, [PACKUMENT, PACKUMENT, PACKUMENT, ATTESTATIONS, ATTESTATIONS, TARBALL]);
     assert.deepEqual(clock.sleeps, [15 * SECOND_MS, 15 * SECOND_MS, 15 * SECOND_MS]);
+  });
+
+  test('then polls the tarball the packument lists every 15 s until it answers 200, reading nothing else', async () => {
+    // npm lists a fresh version before its CDN serves the tarball, which answered 404 for five minutes on 0.8.0.
+    const { done, registry, clock } = wait({
+      [PACKUMENT]: [NEW],
+      [ATTESTATIONS]: [attestations()],
+      [TARBALL]: [404, new Error('no answer within 10 s'), 404, 200],
+    });
+    await done;
+    assert.deepEqual(registry.requests, [PACKUMENT, ATTESTATIONS, TARBALL, TARBALL, TARBALL, TARBALL]);
+    assert.deepEqual(clock.sleeps, [15 * SECOND_MS, 15 * SECOND_MS, 15 * SECOND_MS]);
+  });
+
+  test('a packument without a registry tarball for the version is not there yet', async () => {
+    const bare = { ...(NEW as object), versions: { '0.6.1': { name: MCP, version: '0.6.1' } } };
+    const elsewhere = structuredClone(NEW) as { versions: Record<string, { dist: { tarball: string } }> };
+    const moved = { ...elsewhere, versions: { '0.6.1': { dist: { tarball: 'https://example.com/x-0.6.1.tgz' } } } };
+    const { done, registry } = wait({
+      [PACKUMENT]: [bare, moved, NEW],
+      [ATTESTATIONS]: [attestations()],
+      [TARBALL]: [200],
+    });
+    await done;
+    assert.deepEqual(registry.requests, [PACKUMENT, PACKUMENT, PACKUMENT, ATTESTATIONS, TARBALL]);
+    const never = wait({ [PACKUMENT]: [moved] });
+    await assert.rejects(never.done, {
+      message: /: the packument names no https:\/\/registry\.npmjs\.org\/ tarball for 0\.6\.1$/,
+    });
   });
 
   test('a fetch that fails, or an answer of another shape, is not there yet, and never an error', async () => {
     const { done, registry, clock } = wait({
       [PACKUMENT]: [new Error('no complete answer within 10 s'), 'not json', null, { versions: '0.6.1' }, NEW],
       [ATTESTATIONS]: [new Error('HTTP 503'), { attestations: {} }, { attestations: [{ bundle: {} }] }, attestations()],
+      [TARBALL]: [200],
     });
     await done;
-    assert.equal(registry.requests.length, 9);
+    assert.equal(registry.requests.length, 10);
     assert.equal(clock.sleeps.length, 7);
   });
 
-  test('gives up 10 minutes after the first try, naming what npm still lacks', async () => {
+  test('gives up 15 minutes after the first try, naming what npm still lacks', async () => {
     const { done, registry, clock } = wait({ [PACKUMENT]: [OLD] });
     await assert.rejects(done, {
       message:
-        'npm does not serve @tibia.sh/tibiawiki-mcp@0.6.1 with provenance 10 minutes after the first try: ' +
-        'the packument lists no 0.6.1',
+        'npm does not serve @tibia.sh/tibiawiki-mcp@0.6.1 with provenance and a downloadable tarball ' +
+        '15 minutes after the first try: the packument lists no 0.6.1',
     });
     assert.equal(registry.requests.length, TRIES);
     assert.deepEqual(clock.sleeps, Array(TRIES - 1).fill(15 * SECOND_MS));
   });
 
-  test('the deadline names a missing publish time, a missing provenance, or the last failed fetch', async () => {
+  test('the deadline names a missing publish time, provenance or tarball, or a failed fetch', async () => {
     const untimed = wait({ [PACKUMENT]: [UNTIMED] });
     await assert.rejects(untimed.done, { message: /: the packument records no publish time for 0\.6\.1$/ });
     const unattested = wait({ [PACKUMENT]: [NEW], [ATTESTATIONS]: [attestations(false)] });
@@ -283,22 +329,36 @@ describe('waitForNpm', () => {
     await assert.rejects(unreachable.done, {
       message: new RegExp(`: cannot read ${PACKUMENT.replace(/[.]/g, '\\.')}: HTTP 503$`),
     });
+    const undownloadable = wait({ [PACKUMENT]: [NEW], [ATTESTATIONS]: [attestations()], [TARBALL]: [404] });
+    await assert.rejects(undownloadable.done, {
+      message: new RegExp(`: the tarball ${literal(TARBALL)} answers HTTP 404$`),
+    });
+    assert.equal(undownloadable.registry.requests.filter((url) => url === ATTESTATIONS).length, 1);
+    assert.equal(undownloadable.registry.requests.filter((url) => url === TARBALL).length, TRIES);
+    const silent = wait({
+      [PACKUMENT]: [NEW],
+      [ATTESTATIONS]: [attestations()],
+      [TARBALL]: [new Error('no answer within 10 s')],
+    });
+    await assert.rejects(silent.done, {
+      message: new RegExp(`: cannot read ${literal(TARBALL)}: no answer within 10 s$`),
+    });
   });
 
   test('a try at the deadline is still made, and the one after it is not', async () => {
-    // The version appears on the try 10 minutes after the first, and the provenance one try later.
+    // The version appears on the try 15 minutes after the first, and the tarball one try later.
     const appearing = [...Array<unknown>(TRIES - 1).fill(OLD), NEW];
-    const ready = wait({ [PACKUMENT]: appearing, [ATTESTATIONS]: [attestations()] });
+    const ready = wait({ [PACKUMENT]: appearing, [ATTESTATIONS]: [attestations()], [TARBALL]: [200] });
     await ready.done;
     assert.equal(ready.clock.sleeps.length, TRIES - 1);
-    const late = wait({ [PACKUMENT]: appearing, [ATTESTATIONS]: [attestations(false), attestations()] });
-    await assert.rejects(late.done, { message: /provenance 10 minutes/ });
-    assert.equal(late.registry.requests.filter((url) => url === ATTESTATIONS).length, 1);
+    const late = wait({ [PACKUMENT]: appearing, [ATTESTATIONS]: [attestations()], [TARBALL]: [404, 200] });
+    await assert.rejects(late.done, { message: /tarball 15 minutes/ });
+    assert.equal(late.registry.requests.filter((url) => url === TARBALL).length, 1);
   });
 
   test('no try starts after the deadline, even when each try takes time', async () => {
-    // Each fetch takes 14 s, so tries start 29 s apart: the 21st at 580 s ends at 594 s, and the next would start
-    // at 609 s. The version appearing on that 21st try resolves, and appearing one try later does not.
+    // Each fetch takes 14 s, so tries start 29 s apart: the 32nd at 899 s ends at 913 s, and the next would start
+    // at 928 s. The version appearing on that 32nd try resolves, and appearing one try later does not.
     function slow(queues: Record<string, unknown[]>) {
       const registry = fakeRegistry(queues);
       const clock = fakeClock();
@@ -306,18 +366,23 @@ describe('waitForNpm', () => {
         clock.advance(14 * SECOND_MS);
         return registry.fetchJson(url);
       };
-      return { done: waitForNpm(request, { fetchJson, ...clock }), registry, clock };
+      const fetchStatus = async (url: string) => {
+        clock.advance(14 * SECOND_MS);
+        return registry.fetchStatus(url);
+      };
+      return { done: waitForNpm(request, { fetchJson, fetchStatus, ...clock }), registry, clock };
     }
-    const appearing = [...Array<unknown>(20).fill(OLD), NEW];
-    const ready = slow({ [PACKUMENT]: appearing, [ATTESTATIONS]: [attestations()] });
+    const served = { [ATTESTATIONS]: [attestations()], [TARBALL]: [200] };
+    const appearing = [...Array<unknown>(31).fill(OLD), NEW];
+    const ready = slow({ [PACKUMENT]: appearing, ...served });
     await ready.done;
-    assert.equal(ready.registry.requests.length, 22);
-    assert.equal(ready.clock.sleeps.length, 20);
-    const late = slow({ [PACKUMENT]: [...Array<unknown>(21).fill(OLD), NEW], [ATTESTATIONS]: [attestations()] });
+    assert.equal(ready.registry.requests.length, 34);
+    assert.equal(ready.clock.sleeps.length, 31);
+    const late = slow({ [PACKUMENT]: [...Array<unknown>(32).fill(OLD), NEW], ...served });
     await assert.rejects(late.done, { message: /: the packument lists no 0\.6\.1$/ });
-    assert.equal(late.registry.requests.length, 21);
-    assert.equal(late.clock.sleeps.length, 20);
-    assert.equal(late.clock.now() - Date.parse('2026-09-15T12:00:00.000Z'), 594 * SECOND_MS);
+    assert.equal(late.registry.requests.length, 32);
+    assert.equal(late.clock.sleeps.length, 31);
+    assert.equal(late.clock.now() - Date.parse('2026-09-15T12:00:00.000Z'), 913 * SECOND_MS);
   });
 });
 
@@ -325,10 +390,11 @@ describe('pin', () => {
   const PINS = { [MCP]: '0.6.0', [DATA]: '3.0.3' };
   const ADD = ['pnpm', 'add', '--save-exact', `${MCP}@0.6.1`];
   const CHECK = ['node', 'scripts/check-lockfile.ts'];
-  /** A registry serving MCP 0.6.1 with provenance. */
+  /** A registry serving MCP 0.6.1 with provenance and its tarball. */
   const SERVING = {
     [packumentUrl(MCP)]: [packument(MCP, ['0.6.0', '0.6.1'])],
     [attestationsUrl(MCP, '0.6.1')]: [attestations()],
+    [tarballUrl(MCP, '0.6.1')]: [200],
   };
 
   type Fakes = {
@@ -343,7 +409,13 @@ describe('pin', () => {
     const runner = fakes.run ?? fakeRun();
     const clock = fakeClock();
     const readPackageJson = () => packageJson(fakes.pins ?? PINS);
-    const deps = { readPackageJson, fetchJson: registry.fetchJson, run: runner.run, ...clock };
+    const deps = {
+      readPackageJson,
+      fetchJson: registry.fetchJson,
+      fetchStatus: registry.fetchStatus,
+      run: runner.run,
+      ...clock,
+    };
     return { outcome: pin(parseRequest(MCP, version), deps), registry, run: runner, clock };
   }
 
@@ -373,6 +445,7 @@ describe('pin', () => {
     const registry = {
       [packumentUrl(MCP)]: [packument(MCP, ['0.6.0']), packument(MCP, ['0.6.0', '0.6.1'])],
       [attestationsUrl(MCP, '0.6.1')]: [attestations()],
+      [tarballUrl(MCP, '0.6.1')]: [200],
     };
     const { outcome, run: runner, clock } = pinning('0.6.1', { registry });
     assert.equal(await outcome, 'pinned');
@@ -416,6 +489,18 @@ describe('pin', () => {
     const { outcome, run: runner } = pinning('0.6.1', { registry });
     await assert.rejects(outcome, { message: /npm does not serve/ });
     assert.deepEqual(runner.calls, []);
+  });
+
+  test('a tarball npm does not serve yet holds pnpm add back until it answers 200', async () => {
+    // pnpm add fetches the tarball the packument lists, and failed with ERR_PNPM_TARBALL_HTTP_STATUS on a 404.
+    const registry = { ...SERVING, [tarballUrl(MCP, '0.6.1')]: [404, 404, 200] };
+    const { outcome, run: runner, clock } = pinning('0.6.1', { registry });
+    assert.equal(await outcome, 'pinned');
+    assert.deepEqual(clock.sleeps, [15 * SECOND_MS, 15 * SECOND_MS]);
+    assert.deepEqual(runner.lines(), [ADD, CHECK]);
+    const missing = pinning('0.6.1', { registry: { ...SERVING, [tarballUrl(MCP, '0.6.1')]: [404] } });
+    await assert.rejects(missing.outcome, { message: /: the tarball .* answers HTTP 404$/ });
+    assert.deepEqual(missing.run.calls, []);
   });
 });
 

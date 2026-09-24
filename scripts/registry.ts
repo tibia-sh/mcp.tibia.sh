@@ -1,7 +1,7 @@
 /**
- * The npm registry as the scripts that read it see it: the URLs of a package's documents, a bounded JSON fetch,
- * the provenance entries of an attestations document, and the defensive reads of what comes back.
- * check-lockfile.ts judges a lockfile by these documents, and bump.ts waits for a release to appear in them.
+ * The npm registry as the scripts that read it see it: the URLs of a package's documents, a bounded JSON fetch, a
+ * bounded status check, the provenance entries of an attestations document, and the defensive reads of what comes
+ * back. check-lockfile.ts judges a lockfile by these documents, and bump.ts waits for a release to appear in them.
  */
 
 export const REGISTRY = 'https://registry.npmjs.org/';
@@ -10,6 +10,8 @@ export const PROVENANCE = 'https://slsa.dev/provenance/v1';
 
 /** Resolves with the JSON body of the document at url, and rejects when there is no complete answer. */
 export type FetchJson = (url: string) => Promise<unknown>;
+/** Resolves with the HTTP status a HEAD on url answers with, whatever it is, and rejects when there is no answer. */
+export type FetchStatus = (url: string) => Promise<number>;
 
 /** The value of an own property of value, or undefined when value is not an object or has no such property. */
 export function field(value: unknown, key: string): unknown {
@@ -67,6 +69,21 @@ export async function fetchJson(url: string, timeoutMs: number): Promise<unknown
     return await response.json();
   } catch (error) {
     if (signal.aborted) throw new Error(`no complete answer within ${timeoutMs / 1000} s`);
+    throw error;
+  }
+}
+
+/**
+ * The HTTP status of a HEAD on url, within timeoutMs, after any redirect. It resolves with any status, since the
+ * caller judges it, and rejects only when there is no answer.
+ */
+export async function fetchStatus(url: string, timeoutMs: number): Promise<number> {
+  const signal = AbortSignal.timeout(timeoutMs);
+  try {
+    const response = await fetch(url, { method: 'HEAD', signal });
+    return response.status;
+  } catch (error) {
+    if (signal.aborted) throw new Error(`no answer within ${timeoutMs / 1000} s`);
     throw error;
   }
 }

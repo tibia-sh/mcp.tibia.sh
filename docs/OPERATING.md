@@ -49,8 +49,9 @@ card stay `404`.
    Runs queue one after the other, so a second release pins on the `main` the first one merged.
    - `node scripts/bump.ts pin` runs without the token. It refuses any package but the two above, any version that
      is not an exact `1.2.3`, and any version below the pin. The pinned version ends it with `bump: already-pinned`.
-     Otherwise it waits up to 10 minutes for npm to serve the version with a provenance attestation, runs
-     `pnpm add --save-exact`, then `scripts/check-lockfile.ts` on the result.
+     Otherwise it waits up to 15 minutes for npm to serve the version with a provenance attestation and a tarball
+     that answers `200`, runs `pnpm add --save-exact`, then `scripts/check-lockfile.ts` on the result. npm lists a
+     fresh version before its CDN serves the tarball, and `pnpm add` fails on the `404` it answers meanwhile.
    - `node scripts/bump.ts publish` is the one step with the token. Unchanged files end it with
      `bump: nothing-to-publish`, and the run is green. Otherwise it pushes the branch `bump/<name>-<version>` and
      opens the pull request `chore(deps): bump <package> to <version>`, or reuses the open one. Then it turns
@@ -83,7 +84,7 @@ What can go wrong, and what to do:
 |---|---|
 | Red CI on the bump pull request | The `bump` run turns red after 30 minutes, when its wait for the merge runs out, so act on the red checks without waiting for it. Push the fix to the bump branch, and auto-merge merges it once the checks pass. Or close the pull request, fix the cause on `main`, and run `bump.yml` by hand. |
 | A bump pull request closed, or open past 30 minutes | The `bump` run is red. Fix the cause, then run `bump.yml` by hand. It reuses an open pull request and turns auto-merge on again, or opens a new one. A pull request that merges on its own after the run turned red needs nothing more: a run by hand then finds the version pinned, and its `pin` step ends with `bump: already-pinned`. |
-| A red `bump` run before any pull request exists | Read the last line of the failed step. In `pin`, npm did not serve the version with its provenance within 10 minutes, or the lockfile check refused the version: its provenance does not verify, or the lockfile holds a second copy of a first-party package at a version `package.json` does not pin. Wait, or fix the cause, then run `bump.yml` by hand. In `publish`, gh failed before it opened the pull request, and the line quotes what gh said. `Bad credentials` means the token was revoked, and [The release trigger token](#the-release-trigger-token) describes how to rotate it. |
+| A red `bump` run before any pull request exists | Read the last line of the failed step. In `pin`, npm did not serve the version with its provenance and a downloadable tarball within 15 minutes, or the lockfile check refused the version: its provenance does not verify, or the lockfile holds a second copy of a first-party package at a version `package.json` does not pin. Wait, or fix the cause, then run `bump.yml` by hand. In `publish`, gh failed before it opened the pull request, and the line quotes what gh said. `Bad credentials` means the token was revoked, and [The release trigger token](#the-release-trigger-token) describes how to rotate it. |
 | A version still under a cooldown | The first-party packages skip the 7-day cooldown, and only their dependencies wait for it. The `pin` step fails at `pnpm add` when no version of some dependency is both in the range the release asks for and 7 days old, so the run is red before a pull request exists. Wait until one is, then run `bump.yml` by hand. |
 | A red `hosting` job in a release run | npm and the MCP registry are unaffected. The dispatch may still have arrived, so look for a `bump` run for that version in this repository's Actions tab, and run `bump.yml` by hand if there is none. A second run is harmless. It finds the version pinned, or the pull request open. |
 
