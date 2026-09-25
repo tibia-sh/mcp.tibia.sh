@@ -2,8 +2,7 @@
  * The Worker's request policy, one test per rule and edge.
  *
  * Expected values are literals rather than the module's constants, so a changed constant fails a test. The body
- * cap is the one exception: it follows the pinned server's cap, which test/served-artifact.test.ts checks it
- * against, so these tests derive their sizes from MAX_BODY_BYTES.
+ * cap is pinned once, and the size tests derive their bodies from it.
  */
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
@@ -191,6 +190,11 @@ describe('checkHeaders', () => {
 
   test('an empty Origin header passes', () => {
     assert.equal(checkHeaders(new Headers({ origin: '' })), null);
+  });
+
+  // The cap follows the server's cap, so a change here is a deliberate containment change.
+  test('the cap is 129,024 bytes', () => {
+    assert.equal(MAX_BODY_BYTES, 129_024);
   });
 
   test('a declared length at the cap passes', () => {
