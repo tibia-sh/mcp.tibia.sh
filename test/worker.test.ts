@@ -37,6 +37,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { credentialFreeEnv } from '../scripts/check-config.ts';
 import { deployedCommit, expectedArtifact, mismatches, probe } from '../scripts/served-artifact.ts';
+import { MAX_BODY_BYTES } from '../src/policy.ts';
 import { SERVER_CARD } from '../src/server-card.ts';
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -60,7 +61,7 @@ const DEV_CONTAINER_NAME = 'workerd-mcp-tibia-sh-TibiaWikiMcp-';
 const MCP_HEADERS = { 'content-type': 'application/json', accept: 'application/json, text/event-stream' };
 const TOOLS_LIST = '{"jsonrpc":"2.0","id":1,"method":"tools/list"}';
 /** One byte over the Worker's body cap, and never more (see the 413 test). */
-const OVERSIZED = new Uint8Array(65_537).fill(0x20);
+const OVERSIZED = new Uint8Array(MAX_BODY_BYTES + 1).fill(0x20);
 /** The whole CORS set of every endpoint answer but the landing page, with the names as Headers iterates them. */
 const ENDPOINT_CORS = {
   'access-control-allow-headers': '*',
@@ -587,15 +588,15 @@ test('a preflight on /wiki/server-card is 204, and a POST on it is 405 with Allo
   );
 });
 
-test('a body over 65,536 bytes is 413, declared or chunked, even with the wrong content type', async () => {
+test('a body over the cap is 413, declared or chunked, even with the wrong content type', async () => {
   // Exactly one byte over. In wrangler dev, a 413 answered without draining a larger chunked upload breaks the
   // next pooled request with 500 Network connection lost, which is an artifact of the dev proxy.
   const textPlain = { 'content-type': 'text/plain' };
   const tooLarge = workerAnswer(413, 'Payload Too Large', { cors: ENDPOINT_CORS });
   const declared = await request('/wiki', { method: 'POST', headers: textPlain, body: OVERSIZED });
-  assert.deepEqual(await summary(declared), tooLarge, 'Content-Length: 65537');
+  assert.deepEqual(await summary(declared), tooLarge, `Content-Length: ${OVERSIZED.byteLength}`);
   const streamed = await postChunked('/wiki', textPlain, OVERSIZED, 16_384);
-  assert.deepEqual(await summary(streamed), tooLarge, 'a chunked 65,537-byte body');
+  assert.deepEqual(await summary(streamed), tooLarge, `a chunked ${OVERSIZED.byteLength}-byte body`);
 });
 
 test('a content type other than application/json is 415, and a body that is not JSON-RPC is 400', async () => {

@@ -11,8 +11,13 @@
  * the same code runs in the Workers runtime and under node:test.
  */
 
-/** The largest request body the Worker accepts, in bytes. */
-export const MAX_BODY_BYTES = 65_536;
+/**
+ * The largest request body the Worker accepts, in bytes. It follows the server's MAX_BODY_BYTES in
+ * @tibia.sh/tibiawiki-mcp, which sizes a maximal tibia_parse_loot request: 20,000 UTF-16 units at 6 bytes each as
+ * \uXXXX escapes, plus an 8,192-byte envelope, rounded up to a whole KiB. test/served-artifact.test.ts checks
+ * that it is never below the pinned server's cap.
+ */
+export const MAX_BODY_BYTES = 129_024;
 
 /** The pause before the one retry of a failed container fetch. */
 export const RETRY_DELAY_MS = 500;
