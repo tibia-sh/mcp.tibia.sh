@@ -1,7 +1,9 @@
 /**
  * The Worker's request policy, one test per rule and edge.
  *
- * Expected values are literals rather than the module's constants, so a changed constant fails a test.
+ * Expected values are literals rather than the module's constants, so a changed constant fails a test. The body
+ * cap is the one exception: it follows the pinned server's cap, which test/served-artifact.test.ts checks it
+ * against, so these tests derive their sizes from MAX_BODY_BYTES.
  */
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
@@ -13,6 +15,7 @@ import {
   checkHeaders,
   checkJsonRpcShape,
   forwardWithRetry,
+  MAX_BODY_BYTES,
   notModified,
   rateLimitKey,
   readCapped,
@@ -190,12 +193,12 @@ describe('checkHeaders', () => {
     assert.equal(checkHeaders(new Headers({ origin: '' })), null);
   });
 
-  test('a declared length of 65,536 bytes passes', () => {
-    assert.equal(checkHeaders(new Headers({ 'content-length': '65536' })), null);
+  test('a declared length at the cap passes', () => {
+    assert.equal(checkHeaders(new Headers({ 'content-length': String(MAX_BODY_BYTES) })), null);
   });
 
-  test('a declared length of 65,537 bytes is 413', () => {
-    assert.deepEqual(checkHeaders(new Headers({ 'content-length': '65537' })), PAYLOAD_TOO_LARGE);
+  test('a declared length one byte over the cap is 413', () => {
+    assert.deepEqual(checkHeaders(new Headers({ 'content-length': String(MAX_BODY_BYTES + 1) })), PAYLOAD_TOO_LARGE);
   });
 
   test('a declared length that does not parse is left to readCapped, which reads a small body', async () => {
@@ -229,20 +232,23 @@ function chunkedStream(chunks: Uint8Array[]) {
 }
 
 describe('readCapped', () => {
-  // These two compare 64 KiB arrays by length and Buffer.compare, because a failing deepEqual renders every
+  // These two compare cap-sized arrays by length and Buffer.compare, because a failing deepEqual renders every
   // element and takes seconds.
-  test('a 65,536-byte stream is read whole and in order', async () => {
-    const { stream, state } = chunkedStream([new Uint8Array(40_000).fill(1), new Uint8Array(25_536).fill(2)]);
+  test('a stream at the cap is read whole and in order', async () => {
+    const { stream, state } = chunkedStream([
+      new Uint8Array(40_000).fill(1),
+      new Uint8Array(MAX_BODY_BYTES - 40_000).fill(2),
+    ]);
     const body = await readCapped(stream);
     assert.ok(body !== null, 'readCapped returned null');
-    assert.equal(body.byteLength, 65_536);
-    const expected = new Uint8Array(65_536).fill(1).fill(2, 40_000);
+    assert.equal(body.byteLength, MAX_BODY_BYTES);
+    const expected = new Uint8Array(MAX_BODY_BYTES).fill(1).fill(2, 40_000);
     assert.equal(Buffer.compare(body, expected), 0, 'the bytes are not the chunks in order');
     assert.equal(state.cancelled, false);
   });
 
-  test('a 65,537-byte stream is null, cancelled, and not read past its 65,537th byte', async () => {
-    const { stream, state } = chunkedStream([new Uint8Array(65_536), new Uint8Array(1)]);
+  test('a stream one byte over the cap is null, cancelled, and not read past that byte', async () => {
+    const { stream, state } = chunkedStream([new Uint8Array(MAX_BODY_BYTES), new Uint8Array(1)]);
     const body = await readCapped(stream);
     assert.ok(body === null, `readCapped returned ${body?.byteLength} bytes`);
     assert.deepEqual(state, { pulls: 2, cancelled: true });
@@ -255,7 +261,7 @@ describe('readCapped', () => {
   for (const [name, cancel] of failingCancels) {
     test(`a stream over the cap whose cancel ${name} is still null`, async () => {
       const stream = new ReadableStream<Uint8Array>(
-        { pull: (controller) => controller.enqueue(new Uint8Array(65_537)), cancel },
+        { pull: (controller) => controller.enqueue(new Uint8Array(MAX_BODY_BYTES + 1)), cancel },
         { highWaterMark: 0 },
       );
       assert.equal(await settledOrPending(readCapped(stream)), null);

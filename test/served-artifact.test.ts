@@ -2,12 +2,17 @@
  * The served-artifact check compares the tool names an endpoint serves with the TOOL_NAMES of the pinned
  * @tibia.sh/tibiawiki-mcp, as sets, so a server release that adds or renames a tool deploys without a change
  * here.
+ *
+ * The Worker's body cap follows the server's cap, and is never below the pinned server's MAX_BODY_BYTES, so the
+ * Worker cannot refuse a request the server accepts.
  */
+import { MAX_BODY_BYTES as SERVER_MAX_BODY_BYTES } from '@tibia.sh/tibiawiki-mcp/dist/http.js';
 import { TOOL_NAMES } from '@tibia.sh/tibiawiki-mcp/dist/server.js';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { expectedArtifact, mismatches } from '../scripts/served-artifact.ts';
 import type { EraReport } from '../scripts/served-artifact.ts';
+import { MAX_BODY_BYTES } from '../src/policy.ts';
 
 const expected = expectedArtifact();
 
@@ -53,4 +58,11 @@ test('a name swapped for another at the same count gives one line naming both', 
   const [swapped, ...rest] = TOOL_NAMES;
   assert.ok(swapped !== undefined);
   assertOneLineNaming([served([...rest, 'tibia_extra'])], [swapped, 'tibia_extra']);
+});
+
+test("the Worker's body cap is at least the pinned server's", () => {
+  assert.ok(
+    MAX_BODY_BYTES >= SERVER_MAX_BODY_BYTES,
+    `the Worker's cap of ${MAX_BODY_BYTES} bytes is below the server's ${SERVER_MAX_BODY_BYTES}`,
+  );
 });
