@@ -167,8 +167,8 @@ importers:
   .:
     dependencies:
       '@tibia.sh/tibiawiki-data':
-        specifier: 3.1.0
-        version: 3.1.0
+        specifier: 3.2.0
+        version: 3.2.0
       '@tibia.sh/tibiawiki-mcp':
         specifier: 0.13.1
         version: 0.13.1(hono@4.13.7)
@@ -619,8 +619,8 @@ packages:
   '@speed-highlight/core@1.2.24':
     resolution: {integrity: sha512-qeW2e1l78afw8VhRPfPQ1Gjj+KU5XFQ/OFV5ti6eTa9bruO7mJyZtA4vw0ofqmA3tKCkROE9xLk3VZoeRc98nw==}
 
-  '@tibia.sh/tibiawiki-data@3.1.0':
-    resolution: {integrity: sha512-F3grmo6SnEWvSX9Tow6CIJGuXa+CNoQS/6bhrNGx+aVaR4ndTuxKwsVgGfNIGpkCZgL5VQ0VNVEx/000o5R/Yw==}
+  '@tibia.sh/tibiawiki-data@3.2.0':
+    resolution: {integrity: sha512-zg/pEPAuwA55K7ynDD7+HuvAhnQuw3FW5f5JNZ9uGrNoK0zPvKINy+cSQhkGeEw5jsIkw9Cz1S5xXfV+AB8ICg==}
 
   '@tibia.sh/tibiawiki-mcp@0.13.1':
     resolution: {integrity: sha512-/zBMHIEyp8znuSMb1POWeZrUn5/lUTcSUPgqwjTz6LUjO4MFYbhs+e/08dJKvCdv2MqiVrUvNSqWFmZfiGYoHA==}
@@ -1178,13 +1178,13 @@ snapshots:
 
   '@speed-highlight/core@1.2.24': {}
 
-  '@tibia.sh/tibiawiki-data@3.1.0': {}
+  '@tibia.sh/tibiawiki-data@3.2.0': {}
 
   '@tibia.sh/tibiawiki-mcp@0.13.1(hono@4.13.7)':
     dependencies:
       '@modelcontextprotocol/node': 2.0.0(@modelcontextprotocol/server@2.0.0)(hono@4.13.7)
       '@modelcontextprotocol/server': 2.0.0
-      '@tibia.sh/tibiawiki-data': 3.1.0
+      '@tibia.sh/tibiawiki-data': 3.2.0
       zod: 4.5.4
     transitivePeerDependencies:
       - hono
