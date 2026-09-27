@@ -109,15 +109,18 @@ jobs:
           persist-credentials: false
       # The commit pin pinned on, not the tip of main now, which a push since could have moved. A job
       # output is data, so it is checked whole before git reads it, and never printed. pin runs dependency
-      # code, which could hand on any commit a fetch by SHA reaches, a pull request's head among them, whose
-      # scripts would then run with the token. So the commit must be in main's history before the switch.
-      # The shallow checkout reaches back to the event's commit only, so the history is fetched whole,
-      # commits without their trees, and the switch fetches the trees it needs.
+      # code, which could hand on any commit a fetch by SHA reaches, a pull request's head or an older
+      # commit of main among them, whose scripts would then run with the token. pin moved to main's tip
+      # after the event, so before the switch the commit must be in main's history and descend from
+      # GITHUB_SHA, the event's commit, which the runner sets. The shallow checkout reaches back to the
+      # event's commit only, so the history is fetched whole, commits without their trees, and the switch
+      # fetches the trees it needs.
       - name: Move to pin's commit
         run: |
           [[ $SHA =~ ^[0-9a-f]{40}$ ]] || { echo 'pin handed on no full commit SHA' >&2; exit 1; }
           git fetch --filter=tree:0 --unshallow origin +refs/heads/main:refs/remotes/origin/main
           git merge-base --is-ancestor "$SHA" refs/remotes/origin/main || { echo 'not a commit of main' >&2; exit 1; }
+          git merge-base --is-ancestor "$GITHUB_SHA" "$SHA" || { echo "older than the event's commit" >&2; exit 1; }
           git fetch origin "$SHA" && git switch --detach "$SHA"
         env:
           SHA: ${{ needs.pin.outputs.sha }}
@@ -125,10 +128,15 @@ jobs:
         with:
           node-version: '26'
           package-manager-cache: false
-      # Installs the pnpm that packageManager names, and no dependency.
+      # Installs the pnpm that packageManager names, and no dependency. Even with install: false, pnpm/setup
+      # restores its lockfile verification cache whenever the file cache-dependency-path names hashes to
+      # something, and pin, which runs dependency code, could have planted that archive, whose paths can
+      # reach anywhere the runner user writes. The path names a file the repository never holds, so the
+      # hash is empty and the action restores and saves no cache.
       - uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
         with:
           install: false
+          cache-dependency-path: .publish-restores-no-cache
       # The pin bump.ts pin made, on the lockfile alone: no node_modules, no package script, no pnpmfile
       # and no dependency code. The repository has no pnpmfile, so pin's pnpm add ran without one too. pin
       # validated the package against first-party.ts, and the comparison below binds this run to that

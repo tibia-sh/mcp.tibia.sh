@@ -6,7 +6,7 @@
  * JSON.parse.
  */
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { isDeepStrictEqual } from 'node:util';
 import { parse } from 'yaml';
@@ -38,6 +38,32 @@ const PUBLISH_RECOMPUTE = 'Recompute the pin';
 const PUBLISH_COMPARE = "Require pin's package.json and pnpm-lock.yaml";
 /** How the publish job recomputes the pin: the lockfile alone, running no dependency code and no pnpmfile. */
 const PUBLISH_ADD = 'pnpm add --save-exact --lockfile-only --ignore-scripts --ignore-pnpmfile "$PACKAGE@$VERSION"';
+/**
+ * The scripts of publish's three steps between pin and the token, word for word. pin runs dependency code, so what it
+ * hands on is data: these steps validate it, keep to main's history no older than the event's commit, and require
+ * the bytes publish produced itself. A change to any of them has to change this test on purpose.
+ */
+const PUBLISH_MOVE_RUN = String.raw`[[ $SHA =~ ^[0-9a-f]{40}$ ]] || { echo 'pin handed on no full commit SHA' >&2; exit 1; }
+git fetch --filter=tree:0 --unshallow origin +refs/heads/main:refs/remotes/origin/main
+git merge-base --is-ancestor "$SHA" refs/remotes/origin/main || { echo 'not a commit of main' >&2; exit 1; }
+git merge-base --is-ancestor "$GITHUB_SHA" "$SHA" || { echo "older than the event's commit" >&2; exit 1; }
+git fetch origin "$SHA" && git switch --detach "$SHA"
+`;
+const PUBLISH_RECOMPUTE_RUN = String.raw`[[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'the version is no exact 1.2.3' >&2; exit 1; }
+pnpm add --save-exact --lockfile-only --ignore-scripts --ignore-pnpmfile "$PACKAGE@$VERSION"
+`;
+const PUBLISH_COMPARE_RUN = String.raw`for hash in "$PACKAGE_JSON_SHA256" "$PNPM_LOCK_SHA256"; do
+  [[ $hash =~ ^[0-9a-f]{64}$ ]] || { echo 'pin handed on no sha256' >&2; exit 1; }
+done
+printf '%s  %s\n' "$PACKAGE_JSON_SHA256" package.json "$PNPM_LOCK_SHA256" pnpm-lock.yaml \
+  > "$RUNNER_TEMP/pin.sha256"
+sha256sum --check --strict "$RUNNER_TEMP/pin.sha256"
+`;
+/**
+ * What publish's pnpm/setup hashes for its cache key: a file the repository never holds, so the action restores and
+ * saves no cache in the job that gets the token.
+ */
+const PUBLISH_NO_CACHE = '.publish-restores-no-cache';
 /** The script that ends bump.yml's publish job. It is the one step that gets the App token. */
 const BUMP_PUBLISH = 'node scripts/bump.ts publish "$PACKAGE" "$VERSION"';
 /** The action that mints the App token, without its commit, which a pin bump moves. */
@@ -256,10 +282,11 @@ test("every pnpm/setup step has exactly with: { install: true, require-lockfile:
   const inPublish = ({ where }: Node) => where.startsWith('bump.yml jobs.publish.');
   const others = setups.filter((setup) => !inPublish(setup));
   assert.deepEqual(differingInputs(others, { install: true, 'require-lockfile': true }), []);
-  // The one exception: bump.yml's publish job mints the App token, so it installs pnpm alone and no dependency.
+  // The one exception: bump.yml's publish job mints the App token, so it installs pnpm alone, no dependency, and
+  // restores no cache, whose archive pin could have planted.
   const publish = setups.filter(inPublish);
   assert.equal(publish.length, 1, "bump.yml jobs.publish's pnpm/setup steps");
-  assert.deepEqual(differingInputs(publish, { install: false }), []);
+  assert.deepEqual(differingInputs(publish, { install: false, 'cache-dependency-path': PUBLISH_NO_CACHE }), []);
 });
 
 test("every workflow but alert.yml has top-level permissions { contents: read }, and no job of theirs sets any", () => {
@@ -579,20 +606,21 @@ test('publish runs no install, and recomputes the pin before it gets a token', (
   const steps = stepsOf('bump.yml', 'publish');
   const where = 'bump.yml jobs.publish';
   // pnpm/setup installs pnpm alone. The one pnpm command writes the lockfile and runs no dependency code.
-  assert.deepEqual(stepUsing(steps, 'pnpm/setup', where).step['with'], { install: false });
+  assert.deepEqual(stepUsing(steps, 'pnpm/setup', where).step['with'], {
+    install: false,
+    'cache-dependency-path': PUBLISH_NO_CACHE,
+  });
   const pnpm = steps.flatMap((step) => {
     const run = isMapping(step) ? step['run'] : undefined;
     return typeof run === 'string' ? run.split('\n').filter((line) => /(?<![\w-])pnpm(?![\w-])/.test(line)) : [];
   });
   assert.deepEqual(pnpm, [PUBLISH_ADD]);
   const recompute = stepNamed(steps, PUBLISH_RECOMPUTE, where);
-  assert.ok(
-    String(recompute.step['run']).split('\n').includes(PUBLISH_ADD),
-    `${where} ${PUBLISH_RECOMPUTE} runs no ${PUBLISH_ADD}`,
-  );
-  // The commit and the two hashes pin handed on reach the shell through env, where they are validated whole.
-  assert.deepEqual(stepNamed(steps, PUBLISH_MOVE, where).step['env'], { SHA: '${{ needs.pin.outputs.sha }}' });
+  assert.equal(recompute.step['run'], PUBLISH_RECOMPUTE_RUN);
+  assert.ok(!Object.hasOwn(recompute.step, 'env'), `${where} ${PUBLISH_RECOMPUTE} has an env`);
+  // The two hashes pin handed on reach the shell through env, where they are validated whole and compared.
   const compare = stepNamed(steps, PUBLISH_COMPARE, where);
+  assert.equal(compare.step['run'], PUBLISH_COMPARE_RUN);
   assert.deepEqual(compare.step['env'], {
     PACKAGE_JSON_SHA256: '${{ needs.pin.outputs.package-json-sha256 }}',
     PNPM_LOCK_SHA256: '${{ needs.pin.outputs.pnpm-lock-sha256 }}',
@@ -601,18 +629,19 @@ test('publish runs no install, and recomputes the pin before it gets a token', (
   assert.ok(recompute.at < compare.at && compare.at < token.at, `${where} gets its token before it compares the pin`);
 });
 
-test("publish moves to pin's commit only once it is in main's history", () => {
-  // pin runs dependency code, which could hand on any commit a fetch reaches, a pull request's head among them, whose
-  // scripts/bump.ts would then run with the token. The commit must be main's before the job switches to it.
-  const lines = String(stepNamed(stepsOf('bump.yml', 'publish'), PUBLISH_MOVE, 'bump.yml jobs.publish').step['run'])
-    .split('\n')
-    .map((line) => line.trim());
-  const ancestry = lines.findIndex((line) => line.includes('git merge-base --is-ancestor "$SHA" '));
-  const move = lines.findIndex((line) => line.includes('git switch'));
-  assert.ok(ancestry !== -1, `bump.yml jobs.publish ${PUBLISH_MOVE} checks no ancestry of $SHA`);
-  assert.ok(move !== -1, `bump.yml jobs.publish ${PUBLISH_MOVE} runs no git switch`);
-  assert.ok(ancestry < move, `bump.yml jobs.publish ${PUBLISH_MOVE} switches before it checks the ancestry`);
-  assert.match(lines[ancestry] ?? '', /\|\| \{ .*exit 1; \}$/, 'a failed ancestry check does not end the step');
+test("publish moves to pin's commit only once it is on main and descends from the event's commit", () => {
+  // pin runs dependency code, which could hand on any commit a fetch reaches, a pull request's head or an older
+  // commit of main among them, whose scripts/bump.ts would then run with the token. pin moved to main's tip after
+  // the event, so the commit must be main's and descend from GITHUB_SHA, which the runner sets, before the switch.
+  const move = stepNamed(stepsOf('bump.yml', 'publish'), PUBLISH_MOVE, 'bump.yml jobs.publish');
+  assert.equal(move.step['run'], PUBLISH_MOVE_RUN);
+  assert.deepEqual(move.step['env'], { SHA: '${{ needs.pin.outputs.sha }}' });
+});
+
+test(`no file ${PUBLISH_NO_CACHE} exists, so publish's pnpm/setup finds no lockfile to key a cache on`, () => {
+  // pnpm/setup restores the lockfile verification cache whenever the hash of cache-dependency-path is not empty,
+  // even with install: false, and a restored archive can write anywhere the runner user can.
+  assert.ok(!existsSync(new URL(`../${PUBLISH_NO_CACHE}`, import.meta.url)), `${PUBLISH_NO_CACHE} exists`);
 });
 
 test("only publish's last step gets the App token", () => {
