@@ -31,11 +31,14 @@ jobs:
         with:
           node-version: '26'
           package-manager-cache: false
-      # Installs the pnpm that packageManager names, then runs `pnpm install --frozen-lockfile`.
+      # Installs the pnpm that packageManager names, then runs `pnpm install --frozen-lockfile`. The cache
+      # key hashes a file the repository never holds, so this job, which gets the token, restores and saves
+      # no cache that a job running dependency code could have planted.
       - uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
         with:
           install: true
           require-lockfile: true
+          cache-dependency-path: .deploy-restores-no-cache
       - run: pnpm audit signatures
       # The only step that gets the token. wrangler builds and pushes the image and deploys the Worker, with
       # this commit as DEPLOY_COMMIT, which the landing page answers as x-deploy-commit.

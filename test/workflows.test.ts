@@ -64,6 +64,11 @@ sha256sum --check --strict "$RUNNER_TEMP/pin.sha256"
  * saves no cache in the job that gets the token.
  */
 const PUBLISH_NO_CACHE = '.publish-restores-no-cache';
+/**
+ * What deploy's pnpm/setup hashes for its cache key: a file the repository never holds, so the action restores and
+ * saves no cache in the job that gets the deploy token.
+ */
+const DEPLOY_NO_CACHE = '.deploy-restores-no-cache';
 /** The script that ends bump.yml's publish job. It is the one step that gets the App token. */
 const BUMP_PUBLISH = 'node scripts/bump.ts publish "$PACKAGE" "$VERSION"';
 /** The action that mints the App token, without its commit, which a pin bump moves. */
@@ -275,18 +280,27 @@ test("every actions/setup-node step has exactly with: { node-version: '26', pack
   assert.deepEqual(differingInputs(setups, { 'node-version': '26', 'package-manager-cache': false }), []);
 });
 
-test("every pnpm/setup step has exactly with: { install: true, require-lockfile: true }, but publish's", () => {
+test("every pnpm/setup step has exactly with: { install: true, require-lockfile: true }, but publish's and deploy's", () => {
   const setups = stepsUsing(/^pnpm\/setup@/i, 'a pnpm/setup');
   // Together the two inputs run pnpm install --frozen-lockfile, and fail without pnpm-lock.yaml. Any other input
   // could install a pnpm other than the one packageManager pins, or restore a store another run saved.
   const inPublish = ({ where }: Node) => where.startsWith('bump.yml jobs.publish.');
-  const others = setups.filter((setup) => !inPublish(setup));
+  const inDeploy = ({ where }: Node) => where.startsWith('deploy.yml jobs.deploy.');
+  const others = setups.filter((setup) => !inPublish(setup) && !inDeploy(setup));
   assert.deepEqual(differingInputs(others, { install: true, 'require-lockfile': true }), []);
-  // The one exception: bump.yml's publish job mints the App token, so it installs pnpm alone, no dependency, and
+  // One exception: bump.yml's publish job mints the App token, so it installs pnpm alone, no dependency, and
   // restores no cache, whose archive pin could have planted.
   const publish = setups.filter(inPublish);
   assert.equal(publish.length, 1, "bump.yml jobs.publish's pnpm/setup steps");
   assert.deepEqual(differingInputs(publish, { install: false, 'cache-dependency-path': PUBLISH_NO_CACHE }), []);
+  // The other: deploy.yml's deploy job gets the deploy token, so it installs as the others do, wrangler needs its
+  // dependencies, but restores no cache, whose archive a job that runs dependency code could have planted.
+  const deploy = setups.filter(inDeploy);
+  assert.equal(deploy.length, 1, "deploy.yml jobs.deploy's pnpm/setup steps");
+  assert.deepEqual(
+    differingInputs(deploy, { install: true, 'require-lockfile': true, 'cache-dependency-path': DEPLOY_NO_CACHE }),
+    [],
+  );
 });
 
 test("every workflow but alert.yml has top-level permissions { contents: read }, and no job of theirs sets any", () => {
@@ -642,6 +656,12 @@ test(`no file ${PUBLISH_NO_CACHE} exists, so publish's pnpm/setup finds no lockf
   // pnpm/setup restores the lockfile verification cache whenever the hash of cache-dependency-path is not empty,
   // even with install: false, and a restored archive can write anywhere the runner user can.
   assert.ok(!existsSync(new URL(`../${PUBLISH_NO_CACHE}`, import.meta.url)), `${PUBLISH_NO_CACHE} exists`);
+});
+
+test(`no file ${DEPLOY_NO_CACHE} exists, so deploy's pnpm/setup finds no lockfile to key a cache on`, () => {
+  // pnpm/setup restores the lockfile verification cache whenever the hash of cache-dependency-path is not empty, and
+  // a restored archive can write anywhere the runner user can, in the job that gets the deploy token.
+  assert.ok(!existsSync(new URL(`../${DEPLOY_NO_CACHE}`, import.meta.url)), `${DEPLOY_NO_CACHE} exists`);
 });
 
 test("only publish's last step gets the App token", () => {
