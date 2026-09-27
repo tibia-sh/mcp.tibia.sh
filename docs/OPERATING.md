@@ -54,9 +54,9 @@ card stay `404`.
      CDN serves the tarball, and `pnpm add` fails on the `404` it answers meanwhile. The job hands `publish` its
      commit and the sha256 of `package.json` and `pnpm-lock.yaml`.
    - `publish` runs in the `release-trigger` environment, only when `pin` changed the files. It installs nothing
-     and runs no dependency code. On `pin`'s commit it runs
-     `pnpm add --save-exact --lockfile-only --ignore-scripts`, which writes the two files without `node_modules`,
-     and fails unless both match `pin`'s hashes. Then it mints a token of [the tibia-sh App](#the-tibia-sh-app),
+     and runs no dependency code. It fails unless `pin`'s commit is in `main`'s history. On that commit it runs
+     `pnpm add --save-exact --lockfile-only --ignore-scripts --ignore-pnpmfile`, which writes the two files without
+     `node_modules`, and fails unless both match `pin`'s hashes. Then it mints a token of [the tibia-sh App](#the-tibia-sh-app),
      and `node scripts/bump.ts publish`, the one step with the token, pushes the branch `bump/<name>-<version>`
      and opens the pull request `chore(deps): bump <package> to <version>`, or reuses the open one. Then it turns
      auto-merge on, which merges at once when the checks have already passed, and waits up to 30 minutes for the
