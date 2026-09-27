@@ -26,11 +26,40 @@ const AUDIT_SIGNATURES = 'pnpm audit signatures';
 /** What the last step of deploy.yml's smoke job runs: the served-artifact check of the live URL, for this commit. */
 const SMOKE_CHECK =
   'node scripts/served-artifact.ts https://mcp.tibia.sh/wiki --wait-seconds 600 --expect-commit ${{ github.sha }}';
-/** What bump.yml's bump job runs right after the checkout: the move to the tip of main, which a queued run pins on. */
+/** What bump.yml's pin job runs right after the checkout: the move to the tip of main, which a queued run pins on. */
 const BUMP_FETCH = 'git fetch --depth=1 origin main && git switch --detach FETCH_HEAD';
-/** The two scripts that end bump.yml's bump job, in order. The publish is the one step that gets the trigger token. */
+/** The script that pins, in bump.yml's pin job, without a token. */
 const BUMP_PIN = 'node scripts/bump.ts pin "$PACKAGE" "$VERSION"';
+/** The step of the pin job, after the pin, that hands the publish job the commit, the two hashes and the outcome. */
+const PIN_RESULT = 'Hand publish the commit, the hashes and the outcome';
+/** The steps of bump.yml's publish job that move to pin's commit, recompute the pin and compare it with pin's. */
+const PUBLISH_MOVE = "Move to pin's commit";
+const PUBLISH_RECOMPUTE = 'Recompute the pin';
+const PUBLISH_COMPARE = "Require pin's package.json and pnpm-lock.yaml";
+/** How the publish job recomputes the pin: the lockfile alone, running no dependency code. */
+const PUBLISH_ADD = 'pnpm add --save-exact --lockfile-only --ignore-scripts "$PACKAGE@$VERSION"';
+/** The script that ends bump.yml's publish job. It is the one step that gets the App token. */
 const BUMP_PUBLISH = 'node scripts/bump.ts publish "$PACKAGE" "$VERSION"';
+/** The action that mints the App token, without its commit, which a pin bump moves. */
+const APP_TOKEN = 'actions/create-github-app-token';
+/** What the publish job's token step passes: the App, and a token for this repository's contents and pull requests. */
+const APP_TOKEN_INPUTS = {
+  'client-id': '${{ vars.TIBIA_SH_APP_CLIENT_ID }}',
+  'private-key': '${{ secrets.TIBIA_SH_APP_PRIVATE_KEY }}',
+  owner: 'tibia-sh',
+  repositories: 'mcp.tibia.sh',
+  'permission-contents': 'write',
+  'permission-pull-requests': 'write',
+};
+/** The condition of bump.yml's publish job: pin changed the files. */
+const PUBLISH_IF = "needs.pin.outputs.outcome == 'pinned'";
+/** The condition of alert.yml's job: a run that did not pass, of an event other than a pull request. */
+const ALERT_IF =
+  "github.event.workflow_run.conclusion != 'success' && github.event.workflow_run.conclusion != 'skipped' && " +
+  "github.event.workflow_run.conclusion != 'neutral' && github.event.workflow_run.event != 'pull_request'";
+/** The issue alert.yml comments on, or opens assigned to the maintainer. */
+const ALERT_ISSUE = 'Automation needs a look';
+const ALERT_ASSIGNEE = 'drptbl';
 /** The path of a job's or a step's own if: or continue-on-error. Job IDs hold no dots. */
 const CONDITION = /^jobs\.[^.]+(?:\.steps\.\d+)?\.(?:if|continue-on-error)$/;
 /** The secrets context as an expression names it, and not a property or an identifier that only contains the word. */
@@ -91,6 +120,36 @@ function stepsOf(file: string, job: string): unknown[] {
   const steps = jobsOf(file, workflow(file))[job]?.['steps'];
   assert.ok(Array.isArray(steps), `${file} jobs.${job} has no steps`);
   return steps;
+}
+
+/** The first of steps named name, with its index. where names the job, for the failure. */
+function stepNamed(steps: unknown[], name: string, where: string): { at: number; step: Mapping } {
+  const at = steps.findIndex((step) => isMapping(step) && step['name'] === name);
+  const step = steps[at];
+  assert.ok(isMapping(step), `${where} has no step named ${name}`);
+  return { at, step };
+}
+
+/** The first of steps that uses action at any commit, with its index. where names the job, for the failure. */
+function stepUsing(steps: unknown[], action: string, where: string): { at: number; step: Mapping } {
+  const at = steps.findIndex(
+    (step) => isMapping(step) && typeof step['uses'] === 'string' && step['uses'].replace(/@.*$/, '') === action,
+  );
+  const step = steps[at];
+  assert.ok(isMapping(step), `${where} has no step that uses ${action}`);
+  return { at, step };
+}
+
+/**
+ * The shape of a job's steps: the action of each uses: without its commit, which a pin bump moves, the name of a named
+ * step, and the command of any other.
+ */
+function shapeOf(steps: unknown[]): unknown[] {
+  return steps.map((step) => {
+    if (!isMapping(step)) return step;
+    if (typeof step['uses'] === 'string') return step['uses'].replace(/@.*$/, '');
+    return step['name'] ?? step['run'];
+  });
 }
 
 /** The first of steps that runs exactly command, with its index. where names the job, for the failure. */
@@ -190,22 +249,38 @@ test("every actions/setup-node step has exactly with: { node-version: '26', pack
   assert.deepEqual(differingInputs(setups, { 'node-version': '26', 'package-manager-cache': false }), []);
 });
 
-test('every pnpm/setup step has exactly with: { install: true, require-lockfile: true }', () => {
+test("every pnpm/setup step has exactly with: { install: true, require-lockfile: true }, but publish's", () => {
   const setups = stepsUsing(/^pnpm\/setup@/i, 'a pnpm/setup');
   // Together the two inputs run pnpm install --frozen-lockfile, and fail without pnpm-lock.yaml. Any other input
   // could install a pnpm other than the one packageManager pins, or restore a store another run saved.
-  assert.deepEqual(differingInputs(setups, { install: true, 'require-lockfile': true }), []);
+  const inPublish = ({ where }: Node) => where.startsWith('bump.yml jobs.publish.');
+  const others = setups.filter((setup) => !inPublish(setup));
+  assert.deepEqual(differingInputs(others, { install: true, 'require-lockfile': true }), []);
+  // The one exception: bump.yml's publish job mints the App token, so it installs pnpm alone and no dependency.
+  const publish = setups.filter(inPublish);
+  assert.equal(publish.length, 1, "bump.yml jobs.publish's pnpm/setup steps");
+  assert.deepEqual(differingInputs(publish, { install: false }), []);
 });
 
-test("every workflow's top-level permissions are exactly { contents: read }, and no job sets permissions", () => {
+test("every workflow but alert.yml has top-level permissions { contents: read }, and no job of theirs sets any", () => {
   assert.ok(workflows.length > 0, 'no workflow was found');
-  for (const { file, document } of workflows) {
+  for (const { file, document } of workflows.filter(({ file }) => file !== 'alert.yml')) {
     const permissions = isMapping(document) ? document['permissions'] : undefined;
     assert.deepEqual(permissions, { contents: 'read' }, `${file} top-level permissions`);
     const jobs = Object.entries(jobsOf(file, document));
     const widening = jobs.filter(([, job]) => Object.hasOwn(job, 'permissions')).map(([id]) => `${file} jobs.${id}`);
     assert.deepEqual(widening, [], 'jobs that set permissions');
   }
+  // The one exception: alert.yml reads no code and grants nothing at the top, and its one job writes the alert
+  // issue with GITHUB_TOKEN.
+  const alert = workflow('alert.yml');
+  assert.deepEqual(isMapping(alert) ? alert['permissions'] : undefined, {}, 'alert.yml top-level permissions');
+  const jobs = jobsOf('alert.yml', alert);
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(jobs).map(([id, job]) => [id, job['permissions']])),
+    { alert: { issues: 'write' } },
+    'alert.yml job permissions',
+  );
 });
 
 test("ci.yml's triggers are exactly pull_request and workflow_call", () => {
@@ -250,15 +325,17 @@ test('ci.yml references no secrets context', () => {
   assert.deepEqual(references('ci.yml', workflow('ci.yml'), SECRETS_CONTEXT), []);
 });
 
-test('the secrets any workflow references are the two tokens, once each, in the env of the step that uses it', () => {
-  // The deploy token reaches the wrangler step of deploy.yml, and the release trigger token the publish step of
-  // bump.yml. Every other step of every workflow, the whole of ci.yml above all, runs without a secret.
+test('no workflow reads a PAT secret: the secrets are the App key and the deploy token, once each', () => {
+  // The deploy token reaches the wrangler step of deploy.yml through its env. The App key reaches the token step of
+  // bump.yml's publish job through with: private-key, the one named exception to a secret in the env of the step
+  // that uses it, since the action takes the key as an input. Every other step of every workflow, the whole of
+  // ci.yml above all, runs without a secret.
   const wrangler = stepRunning(stepsOf('deploy.yml', 'deploy'), WRANGLER_DEPLOY, 'deploy.yml jobs.deploy');
-  const publish = stepRunning(stepsOf('bump.yml', 'bump'), BUMP_PUBLISH, 'bump.yml jobs.bump');
+  const token = stepUsing(stepsOf('bump.yml', 'publish'), APP_TOKEN, 'bump.yml jobs.publish');
   assert.deepEqual(
     workflows.flatMap(({ file, document }) => references(file, document, SECRETS_CONTEXT)).toSorted(),
     [
-      `bump.yml jobs.bump.steps.${publish.at}.env.GH_TOKEN: secrets.HOSTING_DISPATCH_TOKEN`,
+      `bump.yml jobs.publish.steps.${token.at}.with.private-key: secrets.TIBIA_SH_APP_PRIVATE_KEY`,
       `deploy.yml jobs.deploy.steps.${wrangler.at}.env.CLOUDFLARE_API_TOKEN: secrets.CLOUDFLARE_API_TOKEN`,
     ],
   );
@@ -267,22 +344,28 @@ test('the secrets any workflow references are the two tokens, once each, in the 
     CLOUDFLARE_ACCOUNT_ID: '${{ vars.CLOUDFLARE_ACCOUNT_ID }}',
     WRANGLER_SEND_METRICS: 'false',
   });
-  assert.deepEqual(publish.step['env'], { GH_TOKEN: '${{ secrets.HOSTING_DISPATCH_TOKEN }}' });
+  assert.ok(!Object.hasOwn(token.step, 'env'), 'bump.yml jobs.publish token step has an env');
+  assert.deepEqual(token.step['with'], APP_TOKEN_INPUTS);
 });
 
-test('no run: in bump.yml contains ${{, so the payload reaches the scripts as arguments read from env', () => {
-  // A dispatch payload is untrusted. Interpolated into a command line, it would be run as shell text.
-  const interpolating = [...nodes('bump.yml', workflow('bump.yml'))]
-    .filter(({ key, value }) => key === 'run' && typeof value === 'string' && value.includes('${{'))
-    .map(({ where }) => where);
+test('no run: in bump.yml or alert.yml contains ${{, so payloads and event fields reach the shell from env', () => {
+  // A dispatch payload, a job output and a workflow_run event field are data. Interpolated into a command line, any
+  // of them would be run as shell text.
+  const interpolating = ['alert.yml', 'bump.yml'].flatMap((file) =>
+    [...nodes(file, workflow(file))]
+      .filter(({ key, value }) => key === 'run' && typeof value === 'string' && value.includes('${{'))
+      .map(({ where }) => where),
+  );
   assert.deepEqual(interpolating, []);
 });
 
-test("no expression outside deploy.yml's deploy job references the vars context", () => {
+test("no expression outside deploy.yml's deploy job references the vars context, but the App's client ID", () => {
+  const token = stepUsing(stepsOf('bump.yml', 'publish'), APP_TOKEN, 'bump.yml jobs.publish');
   const outside = workflows
     .flatMap(({ file, document }) => references(file, document, VARS_CONTEXT))
     .filter((reference) => !reference.startsWith('deploy.yml jobs.deploy.'));
-  assert.deepEqual(outside, []);
+  // The one exception: the token step of bump.yml's publish job names the App by its client ID.
+  assert.deepEqual(outside, [`bump.yml jobs.publish.steps.${token.at}.with.client-id: vars.TIBIA_SH_APP_CLIENT_ID`]);
 });
 
 test('the secrets scan ends expressions where GitHub does, and reads keys and bare if: values', () => {
@@ -345,12 +428,15 @@ test('no workflow but ci.yml defines a job with the ID of a required check', () 
   assert.deepEqual(reused, []);
 });
 
-test('no job or step in any workflow has an if: or continue-on-error, so a failure stops what depends on it', () => {
+test('no job or step has an if: or continue-on-error, but alert and publish, so a failure stops its dependents', () => {
+  // The two exceptions: alert.yml's job runs only for a run that did not pass, and bump.yml's publish job only when
+  // pin changed the files. Neither condition names a status function, so each also needs what it depends on to
+  // pass.
   assert.deepEqual(
     allNodes()
       .filter(({ path }) => CONDITION.test(path))
-      .map(({ where }) => where),
-    [],
+      .map(({ where, value }) => `${where}: ${String(value)}`),
+    [`alert.yml jobs.alert.if: ${ALERT_IF}`, `bump.yml jobs.publish.if: ${PUBLISH_IF}`],
   );
 });
 
@@ -419,20 +505,35 @@ test('deploy.yml runs in the concurrency group deploy, which never cancels a run
   });
 });
 
-test("bump.yml's one job is bump, in release-trigger, bounded at 60 minutes, with the payload in its env", () => {
-  const jobs = jobsOf('bump.yml', workflow('bump.yml'));
-  assert.deepEqual(Object.keys(jobs), ['bump']);
-  const { bump } = jobs;
-  assert.ok(bump, 'bump.yml has no bump job');
-  // The environment holds the token and deploys from main only. The bound backs the two waits of the scripts, of
-  // 15 and 30 minutes, and the install.
-  assert.equal(bump['environment'], 'release-trigger');
-  assert.equal(bump['timeout-minutes'], 60);
-  // On a workflow_dispatch the inputs, otherwise the client_payload of the repository_dispatch, and nothing else.
-  assert.deepEqual(bump['env'], {
+test("bump.yml's jobs are pin and publish, only publish in release-trigger, the payload in the workflow's env", () => {
+  const document = workflow('bump.yml');
+  const jobs = jobsOf('bump.yml', document);
+  assert.deepEqual(Object.keys(jobs), ['pin', 'publish']);
+  const { pin, publish } = jobs;
+  assert.ok(pin && publish, 'bump.yml needs a pin job and a publish job');
+  // pin runs the install and the lockfile check, and has no environment, so it can never read a credential. The
+  // environment deploys from main only. publish runs once pin has passed, and only when pin changed the files.
+  assert.ok(!Object.hasOwn(pin, 'environment'), 'bump.yml jobs.pin has an environment');
+  assert.equal(publish['environment'], 'release-trigger');
+  assert.equal(publish['needs'], 'pin');
+  assert.equal(publish['if'], PUBLISH_IF);
+  // The bounds back the waits of the scripts: 15 minutes for npm in pin, 30 for the merge in publish, with 15 each
+  // for the setup and pnpm.
+  assert.equal(pin['timeout-minutes'], 30);
+  assert.equal(publish['timeout-minutes'], 45);
+  assert.deepEqual(pin['outputs'], {
+    sha: '${{ steps.result.outputs.sha }}',
+    'package-json-sha256': '${{ steps.result.outputs.package-json-sha256 }}',
+    'pnpm-lock-sha256': '${{ steps.result.outputs.pnpm-lock-sha256 }}',
+    outcome: '${{ steps.result.outputs.outcome }}',
+  });
+  // On a workflow_dispatch the inputs, otherwise the client_payload of the repository_dispatch, and nothing else,
+  // for both jobs.
+  assert.deepEqual(isMapping(document) ? document['env'] : undefined, {
     PACKAGE: "${{ github.event_name == 'workflow_dispatch' && inputs.package || github.event.client_payload.package }}",
     VERSION: "${{ github.event_name == 'workflow_dispatch' && inputs.version || github.event.client_payload.version }}",
   });
+  assert.ok(!Object.hasOwn(pin, 'env') && !Object.hasOwn(publish, 'env'), 'a bump.yml job has an env of its own');
 });
 
 test('bump.yml runs in the concurrency group bump, which never cancels a run and queues up to 100 in order', () => {
@@ -446,29 +547,133 @@ test('bump.yml runs in the concurrency group bump, which never cancels a run and
   });
 });
 
-test("bump.yml's bump job is the checkout, the fetch of main, setup-node, pnpm/setup, the pin and the publish", () => {
+test("bump.yml's pin job is the checkout, the fetch of main, setup-node, pnpm/setup, the pin and its result", () => {
   // A run that waited in the queue was given the main of its event time. The fetch moves it to the tip of main,
-  // where the previous run merged, before the install and the scripts read anything. The actions are named without
-  // their commit, which a pin bump moves.
-  const shape = stepsOf('bump.yml', 'bump').map((step) => {
-    if (!isMapping(step)) return step;
-    return typeof step['uses'] === 'string' ? step['uses'].replace(/@.*$/, '') : step['run'];
-  });
-  assert.deepEqual(shape, [
+  // where the previous run merged, before the install and the scripts read anything.
+  assert.deepEqual(shapeOf(stepsOf('bump.yml', 'pin')), [
     'actions/checkout',
     BUMP_FETCH,
     'actions/setup-node',
     'pnpm/setup',
     BUMP_PIN,
+    PIN_RESULT,
+  ]);
+  const result = stepNamed(stepsOf('bump.yml', 'pin'), PIN_RESULT, 'bump.yml jobs.pin');
+  assert.equal(result.step['id'], 'result');
+});
+
+test("bump.yml's publish job moves to pin's commit, recomputes and compares the pin, then gets a token", () => {
+  assert.deepEqual(shapeOf(stepsOf('bump.yml', 'publish')), [
+    'actions/checkout',
+    PUBLISH_MOVE,
+    'actions/setup-node',
+    'pnpm/setup',
+    PUBLISH_RECOMPUTE,
+    PUBLISH_COMPARE,
+    APP_TOKEN,
     BUMP_PUBLISH,
   ]);
 });
 
-test("the publish step is the only step of bump.yml's bump job with an env", () => {
-  // The token is in that env and nowhere else, so the pin, which runs pnpm and the lockfile check, never sees it.
-  const steps = stepsOf('bump.yml', 'bump');
-  const withEnv = steps.flatMap((step, at) => (isMapping(step) && Object.hasOwn(step, 'env') ? [at] : []));
-  assert.deepEqual(withEnv, [stepRunning(steps, BUMP_PUBLISH, 'bump.yml jobs.bump').at]);
+test('publish runs no install, and recomputes the pin before it gets a token', () => {
+  const steps = stepsOf('bump.yml', 'publish');
+  const where = 'bump.yml jobs.publish';
+  // pnpm/setup installs pnpm alone. The one pnpm command writes the lockfile and runs no dependency code.
+  assert.deepEqual(stepUsing(steps, 'pnpm/setup', where).step['with'], { install: false });
+  const pnpm = steps.flatMap((step) => {
+    const run = isMapping(step) ? step['run'] : undefined;
+    return typeof run === 'string' ? run.split('\n').filter((line) => /(?<![\w-])pnpm(?![\w-])/.test(line)) : [];
+  });
+  assert.deepEqual(pnpm, [PUBLISH_ADD]);
+  const recompute = stepNamed(steps, PUBLISH_RECOMPUTE, where);
+  assert.ok(
+    String(recompute.step['run']).split('\n').includes(PUBLISH_ADD),
+    `${where} ${PUBLISH_RECOMPUTE} runs no ${PUBLISH_ADD}`,
+  );
+  // The commit and the two hashes pin handed on reach the shell through env, where they are validated whole.
+  assert.deepEqual(stepNamed(steps, PUBLISH_MOVE, where).step['env'], { SHA: '${{ needs.pin.outputs.sha }}' });
+  const compare = stepNamed(steps, PUBLISH_COMPARE, where);
+  assert.deepEqual(compare.step['env'], {
+    PACKAGE_JSON_SHA256: '${{ needs.pin.outputs.package-json-sha256 }}',
+    PNPM_LOCK_SHA256: '${{ needs.pin.outputs.pnpm-lock-sha256 }}',
+  });
+  const token = stepUsing(steps, APP_TOKEN, where);
+  assert.ok(recompute.at < compare.at && compare.at < token.at, `${where} gets its token before it compares the pin`);
+});
+
+test("only publish's last step gets the App token", () => {
+  const steps = stepsOf('bump.yml', 'publish');
+  const token = stepUsing(steps, APP_TOKEN, 'bump.yml jobs.publish');
+  assert.equal(token.step['id'], 'token');
+  const last = steps.at(-1);
+  assert.ok(isMapping(last), 'bump.yml jobs.publish has no last step');
+  assert.equal(last['run'], BUMP_PUBLISH);
+  assert.deepEqual(last['env'], { GH_TOKEN: '${{ steps.token.outputs.token }}' });
+  // No other expression in any workflow reads the token step.
+  assert.deepEqual(
+    workflows
+      .flatMap(({ file, document }) => references(file, document, /(?<![\w.-])steps\.token(?![\w-])/))
+      .filter((reference) => !reference.startsWith(`bump.yml jobs.publish.steps.${steps.length - 1}.env.GH_TOKEN:`)),
+    [],
+  );
+});
+
+test("the steps of bump.yml with an env are publish's move, compare and publish", () => {
+  // The token is in the last one's env and nowhere else, so pin, which runs pnpm and the lockfile check, and the
+  // steps of publish before the token never see it.
+  const withEnv = (['pin', 'publish'] as const).flatMap((job) =>
+    stepsOf('bump.yml', job).flatMap((step, at) =>
+      isMapping(step) && Object.hasOwn(step, 'env') ? [`${job} ${String(step['name'] ?? step['run'])}`] : [],
+    ),
+  );
+  assert.deepEqual(withEnv, [
+    `publish ${PUBLISH_MOVE}`,
+    `publish ${PUBLISH_COMPARE}`,
+    `publish ${BUMP_PUBLISH}`,
+  ]);
+});
+
+test('alert comments on failed bump and deploy runs only', () => {
+  const document = workflow('alert.yml');
+  const name = (file: string) => {
+    const parsed = workflow(file);
+    return isMapping(parsed) ? parsed['name'] : undefined;
+  };
+  // workflow_run matches a workflow by its name:, so the names are read from the two files.
+  assert.deepEqual(triggers('alert.yml', document), {
+    workflow_run: { workflows: [name('bump.yml'), name('deploy.yml')], types: ['completed'] },
+  });
+  const jobs = jobsOf('alert.yml', document);
+  assert.deepEqual(Object.keys(jobs), ['alert']);
+  const { alert } = jobs;
+  assert.ok(alert, 'alert.yml has no alert job');
+  assert.equal(alert['if'], ALERT_IF);
+  // Every workflow that writes the alert issue waits its turn in one group, and none replaces another's waiting run.
+  assert.deepEqual(alert['concurrency'], { group: 'automation-alert', 'cancel-in-progress': false, queue: 'max' });
+  const steps = stepsOf('alert.yml', 'alert');
+  // No checkout: the job runs gh alone, on this repository, with GITHUB_TOKEN.
+  assert.deepEqual(
+    steps.filter((step) => isMapping(step) && Object.hasOwn(step, 'uses')),
+    [],
+    'alert.yml jobs.alert uses an action',
+  );
+  assert.equal(steps.length, 1);
+  const [step] = steps;
+  assert.ok(isMapping(step), 'alert.yml jobs.alert has no step');
+  assert.deepEqual(step['env'], {
+    GH_TOKEN: '${{ github.token }}',
+    GH_REPO: '${{ github.repository }}',
+    WORKFLOW: '${{ github.event.workflow_run.name }}',
+    CONCLUSION: '${{ github.event.workflow_run.conclusion }}',
+    RUN_URL: '${{ github.event.workflow_run.html_url }}',
+  });
+  const run = String(step['run']);
+  assert.ok(run.includes(`'${ALERT_ISSUE}'`), `alert.yml jobs.alert names no issue ${ALERT_ISSUE}`);
+  assert.ok(run.includes(`--assignee ${ALERT_ASSIGNEE}`), `alert.yml jobs.alert assigns no ${ALERT_ASSIGNEE}`);
+  assert.ok(
+    run.includes('"$WORKFLOW $CONCLUSION: $RUN_URL"'),
+    'alert.yml jobs.alert writes no <workflow> <conclusion>: <run url>',
+  );
 });
 
 test('wrangler.jsonc has no build key', () => {
