@@ -36,8 +36,8 @@ const PIN_RESULT = 'Hand publish the commit, the hashes and the outcome';
 const PUBLISH_MOVE = "Move to pin's commit";
 const PUBLISH_RECOMPUTE = 'Recompute the pin';
 const PUBLISH_COMPARE = "Require pin's package.json and pnpm-lock.yaml";
-/** How the publish job recomputes the pin: the lockfile alone, running no dependency code. */
-const PUBLISH_ADD = 'pnpm add --save-exact --lockfile-only --ignore-scripts "$PACKAGE@$VERSION"';
+/** How the publish job recomputes the pin: the lockfile alone, running no dependency code and no pnpmfile. */
+const PUBLISH_ADD = 'pnpm add --save-exact --lockfile-only --ignore-scripts --ignore-pnpmfile "$PACKAGE@$VERSION"';
 /** The script that ends bump.yml's publish job. It is the one step that gets the App token. */
 const BUMP_PUBLISH = 'node scripts/bump.ts publish "$PACKAGE" "$VERSION"';
 /** The action that mints the App token, without its commit, which a pin bump moves. */
@@ -599,6 +599,20 @@ test('publish runs no install, and recomputes the pin before it gets a token', (
   });
   const token = stepUsing(steps, APP_TOKEN, where);
   assert.ok(recompute.at < compare.at && compare.at < token.at, `${where} gets its token before it compares the pin`);
+});
+
+test("publish moves to pin's commit only once it is in main's history", () => {
+  // pin runs dependency code, which could hand on any commit a fetch reaches, a pull request's head among them, whose
+  // scripts/bump.ts would then run with the token. The commit must be main's before the job switches to it.
+  const lines = String(stepNamed(stepsOf('bump.yml', 'publish'), PUBLISH_MOVE, 'bump.yml jobs.publish').step['run'])
+    .split('\n')
+    .map((line) => line.trim());
+  const ancestry = lines.findIndex((line) => line.includes('git merge-base --is-ancestor "$SHA" '));
+  const move = lines.findIndex((line) => line.includes('git switch'));
+  assert.ok(ancestry !== -1, `bump.yml jobs.publish ${PUBLISH_MOVE} checks no ancestry of $SHA`);
+  assert.ok(move !== -1, `bump.yml jobs.publish ${PUBLISH_MOVE} runs no git switch`);
+  assert.ok(ancestry < move, `bump.yml jobs.publish ${PUBLISH_MOVE} switches before it checks the ancestry`);
+  assert.match(lines[ancestry] ?? '', /\|\| \{ .*exit 1; \}$/, 'a failed ancestry check does not end the step');
 });
 
 test("only publish's last step gets the App token", () => {
