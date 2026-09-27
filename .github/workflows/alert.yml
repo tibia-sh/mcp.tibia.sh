@@ -1,0 +1,47 @@
+name: alert
+
+# Tells the maintainer when bump or deploy did not pass. It comments `<workflow> <conclusion>: <run url>` on
+# the open issue titled `Automation needs a look`, or opens that issue assigned to drptbl. workflow_run
+# matches a workflow by its name:, so the two names below are bump.yml's and deploy.yml's. A pull request
+# runs neither today, and one never alerts. Runs of every workflow that writes the issue share the
+# concurrency group automation-alert, wait for each other and are never replaced, so no alert is dropped
+# and no second issue is opened.
+on:
+  workflow_run:
+    workflows: [bump, deploy]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  alert:
+    if: >-
+      github.event.workflow_run.conclusion != 'success' &&
+      github.event.workflow_run.conclusion != 'skipped' &&
+      github.event.workflow_run.conclusion != 'neutral' &&
+      github.event.workflow_run.event != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    concurrency: { group: automation-alert, cancel-in-progress: false, queue: max }
+    steps:
+      # No checkout: gh alone, on this repository, with GITHUB_TOKEN. The event's fields reach the shell
+      # through env. The issue is found by its exact title in the open issues, not by a search, whose
+      # index can lag behind an issue opened moments ago.
+      - run: |
+          title='Automation needs a look'
+          body="$WORKFLOW $CONCLUSION: $RUN_URL"
+          number=$(TITLE=$title gh issue list --state open --limit 1000 --json number,title \
+            --jq 'map(select(.title == env.TITLE) | .number) | min // empty')
+          if [[ -n $number ]]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "$title" --assignee drptbl --body "$body"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          WORKFLOW: ${{ github.event.workflow_run.name }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}

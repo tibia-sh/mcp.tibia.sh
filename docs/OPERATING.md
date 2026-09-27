@@ -43,25 +43,30 @@ card stay `404`.
 
 1. The release workflow of [`tibiawiki-mcp`](https://github.com/tibia-sh/tibiawiki-mcp) or
    [`tibiawiki-data`](https://github.com/tibia-sh/tibiawiki-data) publishes to npm. Its `hosting` job then sends this
-   repository a `repository_dispatch` of type `first-party-release` naming the package and the version, with the
-   token of its `release-trigger` environment.
-2. The dispatch starts `bump.yml`. Its `bump` job runs in the `release-trigger` environment on the tip of `main`.
-   Runs queue one after the other, so a second release pins on the `main` the first one merged.
-   - `node scripts/bump.ts pin` runs without the token. It refuses any package but the two above, any version that
-     is not an exact `1.2.3`, and any version below the pin. The pinned version ends it with `bump: already-pinned`.
-     Otherwise it waits up to 15 minutes for npm to serve the version with a provenance attestation and a tarball
-     that answers `200`, runs `pnpm add --save-exact`, then `scripts/check-lockfile.ts` on the result. npm lists a
-     fresh version before its CDN serves the tarball, and `pnpm add` fails on the `404` it answers meanwhile.
-   - `node scripts/bump.ts publish` is the one step with the token. Unchanged files end it with
-     `bump: nothing-to-publish`, and the run is green. Otherwise it pushes the branch `bump/<name>-<version>` and
-     opens the pull request `chore(deps): bump <package> to <version>`, or reuses the open one. Then it turns
+   repository a `repository_dispatch` of type `first-party-release` naming the package and the version.
+2. The dispatch starts `bump.yml` on the tip of `main`. Runs queue one after the other, so a second release pins on
+   the `main` the first one merged. It has two jobs:
+   - `pin` has no environment and no credential. `node scripts/bump.ts pin` refuses any package but the two above,
+     any version that is not an exact `1.2.3`, and any version below the pin. The pinned version ends it with
+     `bump: already-pinned`, and the run ends green without `publish`. Otherwise it waits up to 15 minutes for npm
+     to serve the version with a provenance attestation and a tarball that answers `200`, runs
+     `pnpm add --save-exact`, then `scripts/check-lockfile.ts` on the result. npm lists a fresh version before its
+     CDN serves the tarball, and `pnpm add` fails on the `404` it answers meanwhile. The job hands `publish` its
+     commit and the sha256 of `package.json` and `pnpm-lock.yaml`.
+   - `publish` runs in the `release-trigger` environment, only when `pin` changed the files. It installs nothing
+     and runs no dependency code. On `pin`'s commit it runs
+     `pnpm add --save-exact --lockfile-only --ignore-scripts`, which writes the two files without `node_modules`,
+     and fails unless both match `pin`'s hashes. Then it mints a token of [the tibia-sh App](#the-tibia-sh-app),
+     and `node scripts/bump.ts publish`, the one step with the token, pushes the branch `bump/<name>-<version>`
+     and opens the pull request `chore(deps): bump <package> to <version>`, or reuses the open one. Then it turns
      auto-merge on, which merges at once when the checks have already passed, and waits up to 30 minutes for the
      merge.
 3. CI runs the required checks `unit`, `container` and `worker` on the pull request. No job reads a secret, so
    every pull request runs every check. `container` builds the image and checks that it serves the pinned server
    version and index.
 4. Auto-merge rebases the pull request onto `main` once the checks pass. The ruleset has no bypass actors, so
-   nothing merges before they do. The `bump` run ends green with `bump: merged`, and GitHub deletes the branch.
+   nothing merges before they do. The `publish` job ends green with `bump: merged`, and GitHub deletes the
+   branch.
 5. The push to `main` runs `deploy.yml`:
    - `ci` runs the same checks on the merged commit.
    - `deploy` runs `pnpm audit signatures`, then `pnpm exec wrangler deploy` with the token of the
@@ -72,20 +77,24 @@ card stay `404`.
      attempt after 10 minutes.
 
 You can start the chain at step 2 by hand, from a checkout of this repository. gh runs it on `main`, and the
-`release-trigger` environment deploys only from `main`, so a run from another branch fails at its `bump` job:
+`release-trigger` environment deploys only from `main`, so a run from another branch fails at its `publish` job:
 
 ```bash
 gh workflow run bump.yml -f package=@tibia.sh/tibiawiki-mcp -f version=1.2.3
 ```
 
+A `bump.yml` or `deploy.yml` run that does not pass starts `alert.yml`. It comments
+`<workflow> <conclusion>: <run url>` on the open issue titled `Automation needs a look`, or opens that issue and
+assigns it to `drptbl`. Work through the runs it lists, then close it, and the next failure opens a new one.
+
 What can go wrong, and what to do:
 
 | What you see | What to do |
 |---|---|
-| Red CI on the bump pull request | The `bump` run turns red after 30 minutes, when its wait for the merge runs out, so act on the red checks without waiting for it. Push the fix to the bump branch, and auto-merge merges it once the checks pass. Or close the pull request, fix the cause on `main`, and run `bump.yml` by hand. |
-| A bump pull request closed, or open past 30 minutes | The `bump` run is red. Fix the cause, then run `bump.yml` by hand. It reuses an open pull request and turns auto-merge on again, or opens a new one. A pull request that merges on its own after the run turned red needs nothing more: a run by hand then finds the version pinned, and its `pin` step ends with `bump: already-pinned`. |
-| A red `bump` run before any pull request exists | Read the last line of the failed step. In `pin`, npm did not serve the version with its provenance and a downloadable tarball within 15 minutes, or the lockfile check refused the version: its provenance does not verify, or the lockfile holds a second copy of a first-party package at a version `package.json` does not pin. Wait, or fix the cause, then run `bump.yml` by hand. In `publish`, gh failed before it opened the pull request, and the line quotes what gh said. `Bad credentials` means the token was revoked, and [The release trigger token](#the-release-trigger-token) describes how to rotate it. |
-| A version still under a cooldown | The first-party packages skip the 7-day cooldown, and only their dependencies wait for it. The `pin` step fails at `pnpm add` when no version of some dependency is both in the range the release asks for and 7 days old, so the run is red before a pull request exists. Wait until one is, then run `bump.yml` by hand. |
+| Red CI on the bump pull request | The `publish` job turns red after 30 minutes, when its wait for the merge runs out, so act on the red checks without waiting for it. Push the fix to the bump branch, and auto-merge merges it once the checks pass. Or close the pull request, fix the cause on `main`, and run `bump.yml` by hand. |
+| A bump pull request closed, or open past 30 minutes | The `publish` job is red. Fix the cause, then run `bump.yml` by hand. It reuses an open pull request and turns auto-merge on again, or opens a new one. A pull request that merges on its own after the run turned red needs nothing more: a run by hand then finds the version pinned, its `pin` job ends with `bump: already-pinned`, and `publish` does not run. |
+| A red `bump` run before any pull request exists | Read the last line of the failed step. In `pin`, npm did not serve the version with its provenance and a downloadable tarball within 15 minutes, or the lockfile check refused the version: its provenance does not verify, or the lockfile holds a second copy of a first-party package at a version `package.json` does not pin. Wait, or fix the cause, then run `bump.yml` by hand. In `publish`, before the token, `sha256sum` names a file whose recomputed pin differs from `pin`'s, which a registry change between the two jobs can cause: run `bump.yml` by hand. A failed token step, or `Bad credentials` from gh, means the App's key or its installation no longer works, and [The tibia-sh App](#the-tibia-sh-app) describes how to rotate the key. Otherwise gh failed before it opened the pull request, and the line quotes what gh said. A failed `publish` is recovered by running `bump.yml` by hand, since its `pin` finds the version pinned only once `main` has it. |
+| A version still under a cooldown | The first-party packages skip the 7-day cooldown, and only their dependencies wait for it. The `pin` job fails at `pnpm add` when no version of some dependency is both in the range the release asks for and 7 days old, so the run is red before a pull request exists. Wait until one is, then run `bump.yml` by hand. |
 | A red `hosting` job in a release run | npm and the MCP registry are unaffected. The dispatch may still have arrived, so look for a `bump` run for that version in this repository's Actions tab, and run `bump.yml` by hand if there is none. A second run is harmless. It finds the version pinned, or the pull request open. |
 
 Nothing bumps the other dependencies for you. You bump `wrangler` and the other npm packages, the base image digest
@@ -182,38 +191,42 @@ The token has no expiry, so it lasts until it is rotated or revoked. To rotate i
 3. Run `deploy.yml` on `main`, as in [Deploy](#deploy), and wait for `smoke` to pass.
 4. Revoke the old token.
 
-## The release trigger token
+## The tibia-sh App
 
-`HOSTING_DISPATCH_TOKEN` is your fine-grained personal access token, with `tibia-sh` as its resource owner and
-`mcp.tibia.sh` as the only repository it can reach. It is a secret of the `release-trigger` environment
-in each of the three repositories, `mcp.tibia.sh`, `tibiawiki-mcp` and `tibiawiki-data`, and each of those
-environments deploys from `main` only. The `publish` step of `bump.yml` reads it here. The `hosting` job of each
-release workflow reads it there, to send the dispatch.
+The `publish` job of `bump.yml` opens its pull request as the `tibia-sh-bot` GitHub App, ID `5091135`, which the
+`tibia-sh` organization owns and has installed on all its repositories. The job mints a token with
+`actions/create-github-app-token` from two organization settings: the variable `TIBIA_SH_APP_CLIENT_ID` and the
+secret `TIBIA_SH_APP_PRIVATE_KEY`, the App's private key. The job runs in the `release-trigger` environment, which
+deploys from `main` only, and the token reaches only the step that runs `node scripts/bump.ts publish`.
 
-The token holds these permissions on `mcp.tibia.sh`:
+The token reaches `mcp.tibia.sh` alone, with these permissions, and expires within the hour. The action revokes it
+when the job ends.
 
 | Permission | Access |
 |---|---|
 | Contents | Read and write |
 | Pull requests | Read and write |
-| Metadata | Read, which GitHub adds to every fine-grained token |
+| Metadata | Read, which GitHub adds to every App token |
 
-The token has no expiry, so it lasts until it is rotated or revoked. The organization's token policy caps a
-fine-grained token at 366 days by default, and it was set to allow no expiry before the token was created.
+A pull request the App opens runs CI, which one opened with `GITHUB_TOKEN` would not, and it is the App's, so you
+can tell it from yours.
 
-The token means control of what the endpoint serves. The ruleset merges any pull request whose required checks
-pass, and those checks run the pull request's own scripts and tests, so a holder can push a branch whose checks
-pass by construction, open the pull request, turn on auto-merge, and land whatever `src/`, `Dockerfile`,
-`wrangler.jsonc` or lockfile they like on `main`. The merge deploys it, and a build command in `wrangler.jsonc` or a
-dependency standing in for wrangler would run in the deploy step next to the Cloudflare token. The token is your
-own identity, so no rule can tell its pull requests from yours. It cannot push to `main` directly, read a secret
-through the API, or touch the other two repositories, and without the Workflows permission it cannot change a
-workflow file. The maintainer accepted that trade-off.
+The key means more than that token. By the maintainer's decision, the App's installation holds broad permissions on
+every repository of the organization, workflows, secrets, actions and environments among them, and whoever holds
+the key can mint a token with all of them. A leaked key can rewrite workflows and reach their secrets. On this
+repository, the ruleset merges any pull request whose required checks pass, and those checks run the pull request's
+own scripts and tests, so a holder can also land whatever `src/`, `Dockerfile`, `wrangler.jsonc`, lockfile or
+workflow they like on `main`, and the merge deploys it next to the Cloudflare token. The ruleset has no bypass
+actors, and the App holds no administration permission, so a holder cannot push to `main` directly or change the
+ruleset. The maintainer accepted that trade-off.
 
-If this token leaks, revoke it first. Then close every open pull request, your own included, and open none but
-the revert below until it has merged, since one with auto-merge on merges without the token once its checks pass
-and deploys `main` as the holder left it. Cancel any run of `deploy.yml` still queued or in progress, since its
-`deploy` job reads the Cloudflare token when it starts. Then rotate the Cloudflare token, as
+If the key leaks, revoke it first: in the App's settings, generate a new private key and delete the leaked one, then
+put the new key in `TIBIA_SH_APP_PRIVATE_KEY`, as in the rotation below. A token minted with the leaked key stays
+valid until it expires, within the hour. To cut it off at once, suspend the App's installation in the
+organization's settings, and unsuspend it once the new key is stored. Then close every open pull request, your own
+included, and open none but the revert below until it has merged, since one with auto-merge on merges without a
+token once its checks pass and deploys `main` as the holder left it. Cancel any run of `deploy.yml` still queued or
+in progress, since its `deploy` job reads the Cloudflare token when it starts. Then rotate the Cloudflare token, as
 [The deploy token](#the-deploy-token) describes but without its deploy: create the new token, store it and revoke
 the old one. A deploy the holder landed may have read the old token, and while that token is valid its holder can
 deploy or delete at Cloudflare outside GitHub, so the rotation goes before the revert, which waits on checks, a
@@ -222,13 +235,12 @@ serves, and revert anything you did not land yourself in a revert pull request. 
 the new token. Do not deploy before that, since a deploy would run the new token next to whatever the holder
 landed. Last, run the `curl` again to confirm that the endpoint serves the revert.
 
-To rotate it:
+The key has no expiry, so it lasts until it is deleted. To rotate it:
 
-1. Create a new token the same way: resource owner `tibia-sh`, repository access `mcp.tibia.sh` only, the
-   permissions above, and no expiration.
-2. Run `gh secret set HOSTING_DISPATCH_TOKEN --env release-trigger --repo tibia-sh/<repo>` for `mcp.tibia.sh`,
-   `tibiawiki-mcp` and `tibiawiki-data`. Each prompts for the token, so it stays out of your shell history.
-3. Revoke the old token.
+1. In the App's settings, under Private keys, generate a new private key. GitHub downloads it as a `.pem` file.
+2. In the organization's settings, under Secrets and variables, Actions, update `TIBIA_SH_APP_PRIVATE_KEY` with
+   the file's content. Updating the value keeps the repositories that can read it.
+3. Delete the old key in the App's settings, and delete the downloaded file.
 
 ## Decommissioning
 
@@ -241,5 +253,5 @@ To rotate it:
    `pnpm exec wrangler containers list`.
 4. Delete each image tag with `pnpm exec wrangler containers images delete <IMAGE>:<TAG>`, taking them from
    `pnpm exec wrangler containers images list`.
-5. Revoke the deploy token, so a later merge cannot deploy the service again, and the release trigger token too, or
-   a later first-party release keeps opening bump pull requests here.
+5. Revoke the deploy token, so a later merge cannot deploy the service again, and take this repository out of the
+   tibia-sh App's installation, or a later first-party release keeps opening bump pull requests here.

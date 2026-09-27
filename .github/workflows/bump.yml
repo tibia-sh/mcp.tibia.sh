@@ -3,12 +3,20 @@ name: bump
 # Pins a first-party release and gets the pull request that pins it merged. The release workflows of
 # tibiawiki-mcp and tibiawiki-data send first-party-release once npm accepted a publish, with the package
 # and the version in the payload. CI on the pull request is the gate. The ruleset merges it once unit,
-# container and worker pass, and the publish step waits for that merge, so a stalled pull request is a
+# container and worker pass, and the publish job waits for that merge, so a stalled pull request is a
 # red run. Runs queue and never cancel each other. GitHub keeps one waiting run per group by default and
 # replaces it with the next, which could drop a data release behind a server release, so queue: max keeps
 # up to 100 waiting runs and starts them in the order they arrived. A run that waited was given the main
-# of its event time, so the step after the checkout moves to the tip of main, where the previous run
-# merged. To run it by hand from a checkout of this repository, where gh runs it on main:
+# of its event time, so the pin job's step after the checkout moves to the tip of main, where the previous
+# run merged.
+#
+# Two jobs. pin installs, pins and runs the lockfile check, with no credential. publish, only when pin
+# changed the files, mints the tibia-sh App's token in the release-trigger environment and opens the pull
+# request. It installs nothing and runs no dependency code: it recomputes the pin with pnpm on the
+# lockfile alone and requires the same bytes pin produced, so what it commits never came from code the
+# install ran. A failed publish is recovered by running bump.yml again, whose pin finds the version
+# pinned only once main has it. To run it by hand from a checkout of this repository, where gh runs it
+# on main:
 #   gh workflow run bump.yml -f package=@tibia.sh/tibiawiki-mcp -f version=1.2.3
 on:
   repository_dispatch:
@@ -27,19 +35,23 @@ permissions:
 
 concurrency: { group: bump, cancel-in-progress: false, queue: max }
 
+# The payload is untrusted. It reaches the scripts and pnpm as arguments read from these two variables,
+# never as text of a command line. The scripts refuse anything but a first-party package and an exact
+# version, and publish checks the version again before its pnpm add.
+env:
+  PACKAGE: ${{ github.event_name == 'workflow_dispatch' && inputs.package || github.event.client_payload.package }}
+  VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.event.client_payload.version }}
+
 jobs:
-  bump:
+  pin:
     runs-on: ubuntu-latest
-    # pin waits up to 15 minutes for npm and publish up to 30 for the merge, which leaves 15 for the
-    # setup, pnpm add and the lockfile check.
-    timeout-minutes: 60
-    environment: release-trigger
-    # The payload is untrusted. It reaches the scripts as arguments read from these two variables, never
-    # as text of a command line, and the scripts refuse anything but a first-party package and an exact
-    # version.
-    env:
-      PACKAGE: ${{ github.event_name == 'workflow_dispatch' && inputs.package || github.event.client_payload.package }}
-      VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.event.client_payload.version }}
+    # pin waits up to 15 minutes for npm, which leaves 15 for the setup, pnpm add and the lockfile check.
+    timeout-minutes: 30
+    outputs:
+      sha: ${{ steps.result.outputs.sha }}
+      package-json-sha256: ${{ steps.result.outputs.package-json-sha256 }}
+      pnpm-lock-sha256: ${{ steps.result.outputs.pnpm-lock-sha256 }}
+      outcome: ${{ steps.result.outputs.outcome }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -58,12 +70,93 @@ jobs:
         with:
           install: true
           require-lockfile: true
-      # Without the token. Waits for npm to serve the version with provenance, pins it with pnpm add and
-      # runs the lockfile check on the result. The pinned version ends it with already-pinned.
+      # Waits for npm to serve the version with provenance, pins it with pnpm add and runs the lockfile
+      # check on the result. The pinned version ends it with already-pinned.
       - run: node scripts/bump.ts pin "$PACKAGE" "$VERSION"
+      # The outcome is whether the two files changed, the test bump.ts publish makes for nothing-to-publish:
+      # already-pinned leaves them as main has them, and pinned changes the pin in package.json. git diff
+      # --quiet exits 1 for a difference, and any other end is git failing.
+      - name: Hand publish the commit, the hashes and the outcome
+        id: result
+        run: |
+          status=0
+          git diff --quiet -- package.json pnpm-lock.yaml || status=$?
+          case $status in
+            0) outcome=already-pinned ;;
+            1) outcome=pinned ;;
+            *) exit "$status" ;;
+          esac
+          sha=$(git rev-parse HEAD)
+          package_json=$(sha256sum package.json)
+          pnpm_lock=$(sha256sum pnpm-lock.yaml)
+          {
+            echo "sha=$sha"
+            echo "package-json-sha256=${package_json%% *}"
+            echo "pnpm-lock-sha256=${pnpm_lock%% *}"
+            echo "outcome=$outcome"
+          } >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: pin
+    if: needs.pin.outputs.outcome == 'pinned'
+    runs-on: ubuntu-latest
+    # publish waits up to 30 minutes for the merge, which leaves 15 for the setup and pnpm.
+    timeout-minutes: 45
+    environment: release-trigger
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      # The commit pin pinned on, not the tip of main now, which a push since could have moved. A job
+      # output is data, so it is checked whole before git reads it, and never printed.
+      - name: Move to pin's commit
+        run: |
+          [[ $SHA =~ ^[0-9a-f]{40}$ ]] || { echo 'pin handed on no full commit SHA' >&2; exit 1; }
+          git fetch origin "$SHA" && git switch --detach "$SHA"
+        env:
+          SHA: ${{ needs.pin.outputs.sha }}
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '26'
+          package-manager-cache: false
+      # Installs the pnpm that packageManager names, and no dependency.
+      - uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
+        with:
+          install: false
+      # The pin bump.ts pin made, on the lockfile alone: no node_modules, no package script, no dependency
+      # code. pin validated the package against first-party.ts, and the comparison below binds this run to
+      # that result.
+      - name: Recompute the pin
+        run: |
+          [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'the version is no exact 1.2.3' >&2; exit 1; }
+          pnpm add --save-exact --lockfile-only --ignore-scripts "$PACKAGE@$VERSION"
+      # What publish commits is what it produced itself, byte for byte what pin produced and checked.
+      - name: Require pin's package.json and pnpm-lock.yaml
+        run: |
+          for hash in "$PACKAGE_JSON_SHA256" "$PNPM_LOCK_SHA256"; do
+            [[ $hash =~ ^[0-9a-f]{64}$ ]] || { echo 'pin handed on no sha256' >&2; exit 1; }
+          done
+          printf '%s  %s\n' "$PACKAGE_JSON_SHA256" package.json "$PNPM_LOCK_SHA256" pnpm-lock.yaml \
+            > "$RUNNER_TEMP/pin.sha256"
+          sha256sum --check --strict "$RUNNER_TEMP/pin.sha256"
+        env:
+          PACKAGE_JSON_SHA256: ${{ needs.pin.outputs.package-json-sha256 }}
+          PNPM_LOCK_SHA256: ${{ needs.pin.outputs.pnpm-lock-sha256 }}
+      # A token of the tibia-sh App for this repository alone, with contents and pull requests write,
+      # which expires within the hour. The pull request it opens runs CI, which one opened with
+      # GITHUB_TOKEN would not.
+      - id: token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.TIBIA_SH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.TIBIA_SH_APP_PRIVATE_KEY }}
+          owner: tibia-sh
+          repositories: mcp.tibia.sh
+          permission-contents: write
+          permission-pull-requests: write
       # The only step that gets the token. Opens the pull request from bump/<name>-<version>, or reuses
       # the open one, turns auto-merge on and waits for the merge. Unchanged files end it with
       # nothing-to-publish.
       - run: node scripts/bump.ts publish "$PACKAGE" "$VERSION"
         env:
-          GH_TOKEN: ${{ secrets.HOSTING_DISPATCH_TOKEN }}
+          GH_TOKEN: ${{ steps.token.outputs.token }}
