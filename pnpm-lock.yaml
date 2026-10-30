@@ -170,8 +170,8 @@ importers:
         specifier: 3.4.13
         version: 3.4.13
       '@tibia.sh/tibiawiki-mcp':
-        specifier: 0.17.3
-        version: 0.17.3(hono@4.13.7)
+        specifier: 0.17.4
+        version: 0.17.4(hono@4.13.7)
     devDependencies:
       '@cloudflare/containers':
         specifier: 0.3.7
@@ -622,8 +622,8 @@ packages:
   '@tibia.sh/tibiawiki-data@3.4.13':
     resolution: {integrity: sha512-NMdkq1HXlLiTI5fMPPDLAaPFvFxZuJa9j0UALFnJWHijOrXWFvHUAsobTTIfhFG8OIt8poeUM6znP+Ocnti/nw==}
 
-  '@tibia.sh/tibiawiki-mcp@0.17.3':
-    resolution: {integrity: sha512-gBm0pJcNnUGU2Ruvv7P5XIezTHnVn4OQNA69RPRgm3ZblOT5x1VQatAx2xYeWDOHMyZJ0cst9APU2754a5IdWw==}
+  '@tibia.sh/tibiawiki-mcp@0.17.4':
+    resolution: {integrity: sha512-zNZXr0QV9j73QEcpsJuG58n47fsBses6QCwoTFOE3aa1Ozw5ig1yNqfVN3CeEnqXfqZ3uGONHyvCXjp3/lh1lA==}
     engines: {node: '>=22.13.0'}
     hasBin: true
 
@@ -1180,7 +1180,7 @@ snapshots:
 
   '@tibia.sh/tibiawiki-data@3.4.13': {}
 
-  '@tibia.sh/tibiawiki-mcp@0.17.3(hono@4.13.7)':
+  '@tibia.sh/tibiawiki-mcp@0.17.4(hono@4.13.7)':
     dependencies:
       '@modelcontextprotocol/node': 2.0.0(@modelcontextprotocol/server@2.0.0)(hono@4.13.7)
       '@modelcontextprotocol/server': 2.0.0
