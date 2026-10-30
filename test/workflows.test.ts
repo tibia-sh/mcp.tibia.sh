@@ -6,8 +6,11 @@
  * JSON.parse.
  */
 import assert from 'node:assert/strict';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { test } from 'node:test';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { after, test } from 'node:test';
 import { isDeepStrictEqual } from 'node:util';
 import { parse } from 'yaml';
 
@@ -44,7 +47,7 @@ const PUBLISH_ADD = 'pnpm add --save-exact --lockfile-only --ignore-scripts --ig
  * the bytes publish produced itself. A change to any of them has to change this test on purpose.
  */
 const PUBLISH_MOVE_RUN = String.raw`[[ $SHA =~ ^[0-9a-f]{40}$ ]] || { echo 'pin handed on no full commit SHA' >&2; exit 1; }
-git fetch --filter=tree:0 --unshallow origin +refs/heads/main:refs/remotes/origin/main
+git fetch --filter=blob:none --unshallow origin +refs/heads/main:refs/remotes/origin/main
 git merge-base --is-ancestor "$SHA" refs/remotes/origin/main || { echo 'not a commit of main' >&2; exit 1; }
 git merge-base --is-ancestor "$GITHUB_SHA" "$SHA" || { echo "older than the event's commit" >&2; exit 1; }
 git fetch origin "$SHA" && git switch --detach "$SHA"
@@ -650,6 +653,66 @@ test("publish moves to pin's commit only once it is on main and descends from th
   const move = stepNamed(stepsOf('bump.yml', 'publish'), PUBLISH_MOVE, 'bump.yml jobs.publish');
   assert.equal(move.step['run'], PUBLISH_MOVE_RUN);
   assert.deepEqual(move.step['env'], { SHA: '${{ needs.pin.outputs.sha }}' });
+});
+
+/** Runs git in dir with a fixed identity and none of the user's or the system's config. */
+function gitIn(dir: string, args: string[]): string {
+  return execFileSync('git', args, {
+    cwd: dir,
+    encoding: 'utf8',
+    env: {
+      PATH: process.env['PATH'] ?? '',
+      HOME: dir,
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_AUTHOR_NAME: 'Move Test',
+      GIT_AUTHOR_EMAIL: 'move-test@example.com',
+      GIT_COMMITTER_NAME: 'Move Test',
+      GIT_COMMITTER_EMAIL: 'move-test@example.com',
+    },
+  }).trim();
+}
+
+let moveDir: string | undefined;
+after(() => {
+  if (moveDir !== undefined) rmSync(moveDir, { recursive: true, force: true });
+});
+
+test("publish's move takes a checkout of the event's commit to pin's commit, after main moved past the event", () => {
+  // A queued run: main moved 2 commits past the event's commit while it waited, and pin pinned on the tip. git 2.56.0
+  // crashes repacking a tree:0 unshallow fetch in this case, so on the runners' git this test fails with that filter.
+  moveDir = mkdtempSync(join(tmpdir(), 'mcp-tibia-sh-move-'));
+  const origin = join(moveDir, 'origin.git');
+  const src = join(moveDir, 'src');
+  const work = join(moveDir, 'checkout');
+  for (const dir of [origin, src, work]) gitIn(moveDir, ['init', '--quiet', ...(dir === origin ? ['--bare'] : []), dir]);
+  // The move fetches with a filter, which a file:// origin refuses with a warning unless this allows it.
+  gitIn(origin, ['config', 'uploadpack.allowFilter', 'true']);
+  const commit = (name: string): string => {
+    writeFileSync(join(src, `${name}.txt`), `${name}\n`);
+    gitIn(src, ['add', '--all']);
+    gitIn(src, ['commit', '--quiet', '--message', name]);
+    return gitIn(src, ['rev-parse', 'HEAD']);
+  };
+  // root is the event's commit's parent, so the depth-1 checkout is shallow and the move has history to fetch.
+  commit('root');
+  const event = commit('event');
+  commit('next');
+  const tip = commit('tip');
+  gitIn(src, ['push', '--quiet', `file://${origin}`, 'HEAD:refs/heads/main']);
+  // The checkout as actions/checkout leaves it: the event's commit alone, detached.
+  gitIn(work, ['remote', 'add', 'origin', `file://${origin}`]);
+  gitIn(work, ['fetch', '--quiet', '--no-tags', '--depth=1', 'origin', event]);
+  gitIn(work, ['switch', '--quiet', '--detach', event]);
+  assert.equal(gitIn(work, ['rev-parse', '--is-shallow-repository']), 'true');
+  const move = stepNamed(stepsOf('bump.yml', 'publish'), PUBLISH_MOVE, 'bump.yml jobs.publish');
+  assert.equal(typeof move.step['run'], 'string');
+  const run = spawnSync('bash', ['-e', '-c', String(move.step['run'])], {
+    cwd: work,
+    encoding: 'utf8',
+    env: { PATH: process.env['PATH'] ?? '', HOME: work, GIT_CONFIG_NOSYSTEM: '1', GITHUB_SHA: event, SHA: tip },
+  });
+  assert.equal(run.status, 0, `${run.stdout}${run.stderr}`);
+  assert.equal(gitIn(work, ['rev-parse', 'HEAD']), tip, "the move did not switch to pin's commit");
 });
 
 test(`no file ${PUBLISH_NO_CACHE} exists, so publish's pnpm/setup finds no lockfile to key a cache on`, () => {
