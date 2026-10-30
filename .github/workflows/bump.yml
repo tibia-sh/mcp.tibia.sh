@@ -113,12 +113,13 @@ jobs:
       # commit of main among them, whose scripts would then run with the token. pin moved to main's tip
       # after the event, so before the switch the commit must be in main's history and descend from
       # GITHUB_SHA, the event's commit, which the runner sets. The shallow checkout reaches back to the
-      # event's commit only, so the history is fetched whole, commits without their trees, and the switch
-      # fetches the trees it needs.
+      # event's commit only, so the history is fetched whole, commits and trees without their files, and the
+      # switch fetches the files it needs. Not tree:0, which leaves the trees out too: git 2.56.0 crashes
+      # repacking that fetch once main has moved past the checkout's commit, which is the queued case above.
       - name: Move to pin's commit
         run: |
           [[ $SHA =~ ^[0-9a-f]{40}$ ]] || { echo 'pin handed on no full commit SHA' >&2; exit 1; }
-          git fetch --filter=tree:0 --unshallow origin +refs/heads/main:refs/remotes/origin/main
+          git fetch --filter=blob:none --unshallow origin +refs/heads/main:refs/remotes/origin/main
           git merge-base --is-ancestor "$SHA" refs/remotes/origin/main || { echo 'not a commit of main' >&2; exit 1; }
           git merge-base --is-ancestor "$GITHUB_SHA" "$SHA" || { echo "older than the event's commit" >&2; exit 1; }
           git fetch origin "$SHA" && git switch --detach "$SHA"
