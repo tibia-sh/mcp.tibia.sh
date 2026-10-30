@@ -45,8 +45,8 @@ env:
 jobs:
   pin:
     runs-on: ubuntu-latest
-    # pin waits up to 15 minutes for npm, which leaves 15 for the setup, pnpm add and the lockfile check.
-    timeout-minutes: 30
+    # pin waits up to 45 minutes for npm, which leaves 15 for the setup, pnpm add and the lockfile check.
+    timeout-minutes: 60
     outputs:
       sha: ${{ steps.result.outputs.sha }}
       package-json-sha256: ${{ steps.result.outputs.package-json-sha256 }}

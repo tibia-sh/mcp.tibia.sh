@@ -558,9 +558,9 @@ test("bump.yml's jobs are pin and publish, only publish in release-trigger, the 
   assert.equal(publish['environment'], 'release-trigger');
   assert.equal(publish['needs'], 'pin');
   assert.equal(publish['if'], PUBLISH_IF);
-  // The bounds back the waits of the scripts: 15 minutes for npm in pin, 30 for the merge in publish, with 15 each
+  // The bounds back the waits of the scripts: 45 minutes for npm in pin, 30 for the merge in publish, with 15 each
   // for the setup and pnpm.
-  assert.equal(pin['timeout-minutes'], 30);
+  assert.equal(pin['timeout-minutes'], 60);
   assert.equal(publish['timeout-minutes'], 45);
   assert.deepEqual(pin['outputs'], {
     sha: '${{ steps.result.outputs.sha }}',

@@ -233,8 +233,8 @@ describe('waitForNpm', () => {
   const PACKUMENT = packumentUrl(MCP);
   const ATTESTATIONS = attestationsUrl(MCP, '0.6.1');
   const TARBALL = tarballUrl(MCP, '0.6.1');
-  /** The tries the wait makes at 15 s apart in 15 min, the first at once and the last at the deadline. */
-  const TRIES = 61;
+  /** The tries the wait makes at 15 s apart in 45 min, the first at once and the last at the deadline. */
+  const TRIES = 181;
   const OLD = packument(MCP, ['0.6.0']);
   const NEW = packument(MCP, ['0.6.0', '0.6.1']);
   const UNTIMED = packument(MCP, ['0.6.0', '0.6.1'], false);
@@ -305,12 +305,12 @@ describe('waitForNpm', () => {
     assert.equal(clock.sleeps.length, 7);
   });
 
-  test('gives up 15 minutes after the first try, naming what npm still lacks', async () => {
+  test('gives up 45 minutes after the first try, naming what npm still lacks', async () => {
     const { done, registry, clock } = wait({ [PACKUMENT]: [OLD] });
     await assert.rejects(done, {
       message:
         'npm does not serve @tibia.sh/tibiawiki-mcp@0.6.1 with provenance and a downloadable tarball ' +
-        '15 minutes after the first try: the packument lists no 0.6.1',
+        '45 minutes after the first try: the packument lists no 0.6.1',
     });
     assert.equal(registry.requests.length, TRIES);
     assert.deepEqual(clock.sleeps, Array(TRIES - 1).fill(15 * SECOND_MS));
@@ -346,19 +346,19 @@ describe('waitForNpm', () => {
   });
 
   test('a try at the deadline is still made, and the one after it is not', async () => {
-    // The version appears on the try 15 minutes after the first, and the tarball one try later.
+    // The version appears on the try 45 minutes after the first, and the tarball one try later.
     const appearing = [...Array<unknown>(TRIES - 1).fill(OLD), NEW];
     const ready = wait({ [PACKUMENT]: appearing, [ATTESTATIONS]: [attestations()], [TARBALL]: [200] });
     await ready.done;
     assert.equal(ready.clock.sleeps.length, TRIES - 1);
     const late = wait({ [PACKUMENT]: appearing, [ATTESTATIONS]: [attestations()], [TARBALL]: [404, 200] });
-    await assert.rejects(late.done, { message: /tarball 15 minutes/ });
+    await assert.rejects(late.done, { message: /tarball 45 minutes/ });
     assert.equal(late.registry.requests.filter((url) => url === TARBALL).length, 1);
   });
 
   test('no try starts after the deadline, even when each try takes time', async () => {
-    // Each fetch takes 14 s, so tries start 29 s apart: the 32nd at 899 s ends at 913 s, and the next would start
-    // at 928 s. The version appearing on that 32nd try resolves, and appearing one try later does not.
+    // Each fetch takes 14 s, so tries start 29 s apart: the 94th at 2697 s ends at 2711 s, and the next would start
+    // at 2726 s. The version appearing on that 94th try resolves, and appearing one try later does not.
     function slow(queues: Record<string, unknown[]>) {
       const registry = fakeRegistry(queues);
       const clock = fakeClock();
@@ -373,16 +373,16 @@ describe('waitForNpm', () => {
       return { done: waitForNpm(request, { fetchJson, fetchStatus, ...clock }), registry, clock };
     }
     const served = { [ATTESTATIONS]: [attestations()], [TARBALL]: [200] };
-    const appearing = [...Array<unknown>(31).fill(OLD), NEW];
+    const appearing = [...Array<unknown>(93).fill(OLD), NEW];
     const ready = slow({ [PACKUMENT]: appearing, ...served });
     await ready.done;
-    assert.equal(ready.registry.requests.length, 34);
-    assert.equal(ready.clock.sleeps.length, 31);
-    const late = slow({ [PACKUMENT]: [...Array<unknown>(32).fill(OLD), NEW], ...served });
+    assert.equal(ready.registry.requests.length, 96);
+    assert.equal(ready.clock.sleeps.length, 93);
+    const late = slow({ [PACKUMENT]: [...Array<unknown>(94).fill(OLD), NEW], ...served });
     await assert.rejects(late.done, { message: /: the packument lists no 0\.6\.1$/ });
-    assert.equal(late.registry.requests.length, 32);
-    assert.equal(late.clock.sleeps.length, 31);
-    assert.equal(late.clock.now() - Date.parse('2026-09-15T12:00:00.000Z'), 913 * SECOND_MS);
+    assert.equal(late.registry.requests.length, 94);
+    assert.equal(late.clock.sleeps.length, 93);
+    assert.equal(late.clock.now() - Date.parse('2026-09-15T12:00:00.000Z'), 2711 * SECOND_MS);
   });
 });
 
