@@ -86,7 +86,11 @@ gh workflow run bump.yml -f package=@tibia.sh/tibiawiki-mcp -f version=1.2.3
 
 A `bump.yml` or `deploy.yml` run that does not pass starts `alert.yml`. It comments
 `<workflow> <conclusion>: <run url>` on the open issue titled `Automation needs a look`, or opens that issue and
-assigns it to `drptbl`. Work through the runs it lists, then close it, and the next failure opens a new one.
+assigns it to `drptbl`. When writing the issue fails, most often on a GitHub API error, it tries again after 30,
+60, 120 and 240 seconds, 5 tries in all. Each try lists the open issues again, so an issue opened before its error
+is found and commented on: never a second issue, at worst a repeated comment, when one went through before its
+error. The alert run ends red only when all 5 tries fail. Work through the runs it lists, then close it, and the
+next failure opens a new one.
 
 What can go wrong, and what to do:
 
