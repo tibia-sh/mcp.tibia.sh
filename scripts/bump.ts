@@ -9,7 +9,7 @@
  *
  * `pin` reads the pin in package.json. The same version ends it with `bump: already-pinned`. A lower one fails it,
  * since a release never moves the endpoint back. A newer one waits until npm serves the version with a publish
- * time, a provenance attestation and a tarball that answers 200, polling every 15 seconds for 15 minutes, then runs
+ * time, a provenance attestation and a tarball that answers 200, polling every 15 seconds for 45 minutes, then runs
  * `pnpm add --save-exact <package>@<version>` and `node scripts/check-lockfile.ts`, so a version whose provenance
  * does not verify never reaches a pull request. npm lists a fresh version before its CDN serves the tarball, which
  * answered 404 for five minutes after 0.8.0 was published, and pnpm add fails on that 404. It needs no credentials.
@@ -57,7 +57,7 @@ const VERSION = /^[0-9]+\.[0-9]+\.[0-9]+$/;
 
 /** How often npm is asked for the version, and for how long since the first try. */
 const NPM_POLL_MS = 15_000;
-const NPM_DEADLINE_MS = 15 * 60_000;
+const NPM_DEADLINE_MS = 45 * 60_000;
 /** How long one registry request may take. */
 const FETCH_TIMEOUT_MS = 10_000;
 /** How long one git or gh command may take. */
