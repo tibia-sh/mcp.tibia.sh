@@ -21,7 +21,8 @@ jobs:
       github.event.workflow_run.conclusion != 'neutral' &&
       github.event.workflow_run.event != 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # The step waits up to 450 seconds between its 5 tries. The rest is room for their API calls.
+    timeout-minutes: 15
     permissions:
       issues: write
     concurrency: { group: automation-alert, cancel-in-progress: false, queue: max }
@@ -29,16 +30,29 @@ jobs:
       # No checkout: gh alone, on this repository, with GITHUB_TOKEN. The event's fields reach the shell
       # through env. The issue is found by its exact title in the open issues, not by a search, whose
       # index can lag behind an issue opened moments ago.
+      # One GitHub API error would drop the alert, so write_alert is tried 5 times, 30, 60, 120 and 240
+      # seconds apart. A failed list ends the try, so it never comments or opens on a list it did not
+      # read. bash ignores set -e in a function called before &&, so each command that can fail returns
+      # by itself. Each try lists again, so an issue opened before its error is found and commented on:
+      # never a second issue, at worst a repeated comment, when one went through before its error.
       - run: |
           title='Automation needs a look'
           body="$WORKFLOW $CONCLUSION: $RUN_URL"
-          number=$(TITLE=$title gh issue list --state open --limit 1000 --json number,title \
-            --jq 'map(select(.title == env.TITLE) | .number) | min // empty')
-          if [[ -n $number ]]; then
-            gh issue comment "$number" --body "$body"
-          else
-            gh issue create --title "$title" --assignee drptbl --body "$body"
-          fi
+          write_alert() {
+            number=$(TITLE=$title gh issue list --state open --limit 1000 --json number,title \
+              --jq 'map(select(.title == env.TITLE) | .number) | min // empty') || return 1
+            if [[ -n $number ]]; then
+              gh issue comment "$number" --body "$body" || return 1
+            else
+              gh issue create --title "$title" --assignee drptbl --body "$body" || return 1
+            fi
+          }
+          for delay in 30 60 120 240; do
+            write_alert && exit 0
+            echo "::warning::Writing the alert issue failed. Trying again in $delay seconds."
+            sleep "$delay"
+          done
+          write_alert
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}

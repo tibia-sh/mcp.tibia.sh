@@ -7,7 +7,7 @@
  */
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
@@ -774,6 +774,7 @@ test('alert comments on failed bump and deploy runs only', () => {
   const { alert } = jobs;
   assert.ok(alert, 'alert.yml has no alert job');
   assert.equal(alert['if'], ALERT_IF);
+  assert.equal(alert['timeout-minutes'], 15, 'the alert job has no room for its 450 seconds of waits');
   // Every workflow that writes the alert issue waits its turn in one group, and none replaces another's waiting run.
   assert.deepEqual(alert['concurrency'], { group: 'automation-alert', 'cancel-in-progress': false, queue: 'max' });
   const steps = stepsOf('alert.yml', 'alert');
@@ -800,6 +801,145 @@ test('alert comments on failed bump and deploy runs only', () => {
     run.includes('"$WORKFLOW $CONCLUSION: $RUN_URL"'),
     'alert.yml jobs.alert writes no <workflow> <conclusion>: <run url>',
   );
+});
+
+/** What the alert step gets through env: the watched run's fields, the repository and github.token. */
+const ALERT_ENV = {
+  GH_TOKEN: 'ghs_alert',
+  GH_REPO: 'tibia-sh/mcp.tibia.sh',
+  WORKFLOW: 'bump',
+  CONCLUSION: 'failure',
+  RUN_URL: 'https://github.com/tibia-sh/mcp.tibia.sh/actions/runs/99',
+};
+
+/** The open issue the alert comments on, and two it must pass over: a later one with its title, and another title. */
+const ALERT_ISSUES = [
+  { number: 31, title: ALERT_ISSUE },
+  { number: 30, title: ALERT_ISSUE },
+  { number: 12, title: `${ALERT_ISSUE} again` },
+];
+
+/** The calls the alert step makes to write `bump failure: <run url>`, as the stand-ins log them. */
+const ALERT_LIST =
+  'gh issue list --state open --limit 1000 --json number,title --jq map(select(.title == env.TITLE) | .number) | min // empty';
+const alertComment = (number: number): string => `gh issue comment ${number} --body bump failure: ${ALERT_ENV.RUN_URL}`;
+const ALERT_OPEN =
+  `gh issue create --title ${ALERT_ISSUE} --assignee ${ALERT_ASSIGNEE} --body bump failure: ${ALERT_ENV.RUN_URL}`;
+const alertWarning = (delay: number): string =>
+  `::warning::Writing the alert issue failed. Trying again in ${delay} seconds.`;
+
+/**
+ * The stand-in gh. It logs `gh <args>` to $ALERT_RUN/log, and call N exits with line N of $ALERT_RUN/exits, or 2
+ * when there is none. `issue list ... --jq FILTER` runs the real jq with FILTER over $ALERT_RUN/issues, the open
+ * issues' numbers and titles, as gh does over the fields it fetched. A failed list still prints what it found, so a
+ * step that went on would act on it. `issue create` adds issue 40 to the open issues even when it fails, as an open
+ * whose answer GitHub lost does. A failed call prints the GraphQL error the alert met on 2026-10-30.
+ */
+const ALERT_GH = String.raw`#!/usr/bin/env bash
+printf 'gh %s\n' "$*" >> "$ALERT_RUN/log"
+calls=$(grep -c '^gh ' "$ALERT_RUN/log")
+code=$(sed -n "$calls"p "$ALERT_RUN/exits")
+if [[ -z $code ]]; then
+  echo "stand-in gh: no exit status for call $calls: $*" >&2
+  exit 2
+fi
+if [[ $# -eq 10 && "$1 $2" == 'issue list' && $9 == --jq ]]; then
+  shift 9
+  jq -r "$1" "$ALERT_RUN/issues"
+elif [[ $# -eq 5 && "$1 $2" == 'issue comment' && $4 == --body ]]; then
+  [[ $code -ne 0 ]] || echo "https://github.com/$GH_REPO/issues/$3#issuecomment-1"
+elif [[ $# -eq 8 && "$1 $2" == 'issue create' && $3 == --title && $5 == --assignee && $7 == --body ]]; then
+  jq -c --arg title "$4" '. + [{number: 40, title: $title}]' "$ALERT_RUN/issues" > "$ALERT_RUN/issues.next"
+  mv "$ALERT_RUN/issues.next" "$ALERT_RUN/issues"
+  [[ $code -ne 0 ]] || echo "https://github.com/$GH_REPO/issues/40"
+else
+  echo "stand-in gh: unsupported command: $*" >&2
+  exit 2
+fi
+[[ $code -eq 0 ]] || echo 'GraphQL: Something went wrong while executing your query' >&2
+exit "$code"
+`;
+
+/** The stand-in sleep: it logs `sleep <args>` to $ALERT_RUN/log and returns at once. */
+const ALERT_SLEEP = String.raw`#!/usr/bin/env bash
+printf 'sleep %s\n' "$*" >> "$ALERT_RUN/log"
+`;
+
+let alertDir: string | undefined;
+after(() => {
+  if (alertDir !== undefined) rmSync(alertDir, { recursive: true, force: true });
+});
+
+/**
+ * Runs alert.yml's step as the runner does, with the stand-in gh and sleep first on PATH. `issues` are the open
+ * issues, and `exits` how each gh call exits in turn. jq and everything else is real.
+ */
+function runAlert(issues: Array<{ number: number; title: string }>, exits: number[]) {
+  const [step] = stepsOf('alert.yml', 'alert');
+  assert.ok(isMapping(step) && typeof step['run'] === 'string', 'alert.yml jobs.alert has no run step');
+  alertDir ??= mkdtempSync(join(tmpdir(), 'mcp-tibia-sh-alert-'));
+  const dir = mkdtempSync(join(alertDir, 'run-'));
+  const bin = join(dir, 'bin');
+  mkdirSync(bin);
+  writeFileSync(join(bin, 'gh'), ALERT_GH, { mode: 0o755 });
+  writeFileSync(join(bin, 'sleep'), ALERT_SLEEP, { mode: 0o755 });
+  writeFileSync(join(dir, 'issues'), JSON.stringify(issues));
+  writeFileSync(join(dir, 'exits'), exits.map((code) => `${code}\n`).join(''));
+  const run = spawnSync('bash', ['-e', '-c', step['run']], {
+    cwd: dir,
+    encoding: 'utf8',
+    env: { PATH: `${bin}:${process.env['PATH'] ?? ''}`, HOME: dir, ALERT_RUN: dir, ...ALERT_ENV },
+  });
+  const log = join(dir, 'log');
+  return {
+    status: run.status,
+    output: `${run.stdout}${run.stderr}`,
+    warnings: run.stdout.split('\n').filter((line) => line.startsWith('::warning::')),
+    calls: existsSync(log) ? readFileSync(log, 'utf8').trimEnd().split('\n') : [],
+  };
+}
+
+test('the alert lists 5 times, waiting longer each time, and never comments or opens when it cannot list', () => {
+  // Writing after a failed list would act on a list it could not trust, and could open a second issue beside the
+  // first. The stand-in's failed list still prints what it found, so a step that went on would comment or open.
+  for (const issues of [[], ALERT_ISSUES]) {
+    const run = runAlert(issues, [1, 1, 1, 1, 1]);
+    assert.equal(run.status, 1, `the step did not fail when every list failed\n${run.output}`);
+    assert.deepEqual(run.calls, [
+      ALERT_LIST,
+      'sleep 30',
+      ALERT_LIST,
+      'sleep 60',
+      ALERT_LIST,
+      'sleep 120',
+      ALERT_LIST,
+      'sleep 240',
+      ALERT_LIST,
+    ]);
+    assert.deepEqual(run.warnings, [30, 60, 120, 240].map(alertWarning));
+  }
+});
+
+test('the alert comments once a list that failed finds the issue on the next try', () => {
+  const run = runAlert(ALERT_ISSUES, [1, 0, 0]);
+  assert.equal(run.status, 0, run.output);
+  assert.deepEqual(run.calls, [ALERT_LIST, 'sleep 30', ALERT_LIST, alertComment(30)]);
+  assert.deepEqual(run.warnings, [alertWarning(30)]);
+});
+
+test('the alert lists again and comments again after a comment fails', () => {
+  const run = runAlert(ALERT_ISSUES, [0, 1, 0, 0]);
+  assert.equal(run.status, 0, run.output);
+  assert.deepEqual(run.calls, [ALERT_LIST, alertComment(30), 'sleep 30', ALERT_LIST, alertComment(30)]);
+  assert.deepEqual(run.warnings, [alertWarning(30)]);
+});
+
+test('the alert comments on the issue an open that failed still opened, and never opens a second one', () => {
+  // GitHub can open the issue and still answer with an error. The next try lists again and finds it.
+  const run = runAlert([{ number: 12, title: `${ALERT_ISSUE} again` }], [0, 1, 0, 0]);
+  assert.equal(run.status, 0, run.output);
+  assert.deepEqual(run.calls, [ALERT_LIST, ALERT_OPEN, 'sleep 30', ALERT_LIST, alertComment(40)]);
+  assert.deepEqual(run.warnings, [alertWarning(30)]);
 });
 
 test('wrangler.jsonc has no build key', () => {
